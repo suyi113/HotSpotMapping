@@ -1,11 +1,11 @@
 package net.hotspot.cplus;
 
-
-
 import net.hotspot.cplus.Utils.UnsafeUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -17,6 +17,11 @@ public final class HeapScanner {
             VMStructsHelper.findOffsetOrDefault("oopDesc::_metadata._compressed_klass", 8L);
     private static final long LAYOUT_HELPER_OFF =
             VMStructsHelper.findOffsetOrDefault("Klass::_layout_helper", 8L);
+
+    private static final long KLASS_SUPER_OFF =
+            VMStructsHelper.findOffsetOrDefault("Klass::_super", 128L);
+    private static final long KLASS_JAVA_MIRROR_OFF =
+            VMStructsHelper.findOffsetOrDefault("Klass::_java_mirror", 112L);
 
     private static final int ARRAY_LENGTH_OFF =
             OopDesc.USE_COMPRESSED_CLASS_POINTERS ? 12 : 16;
@@ -34,6 +39,20 @@ public final class HeapScanner {
     }
 
     public static List<Object> getAllInstances(Class<?> clazz) {
+        return getAllInstances(clazz, false, false);
+    }
+
+    public static List<Object> getAllInstancesIncludingSubclasses(Class<?> clazz) {
+        return getAllInstances(clazz, true, false);
+    }
+
+    public static List<Object> getAllInstancesIncludingSuperclasses(Class<?> clazz) {
+        return getAllInstances(clazz, false, true);
+    }
+
+    public static List<Object> getAllInstances(Class<?> clazz,
+                                               boolean includeSubclasses,
+                                               boolean includeSuperclasses) {
         try {
             System.gc();
             Thread.sleep(300);
@@ -43,10 +62,26 @@ public final class HeapScanner {
             e.printStackTrace();
         }
 
-        return getAllInstancesOfKlass(new Klass(clazz).getAddress());
+        long targetKlass = new Klass(clazz).getAddress();
+
+        Set<Long> targetKlasses = new HashSet<>();
+        targetKlasses.add(targetKlass);
+
+        if (includeSubclasses) {
+            targetKlasses.addAll(collectSubclasses(targetKlass));
+        }
+        if (includeSuperclasses) {
+            targetKlasses.addAll(collectSuperclasses(targetKlass));
+        }
+
+        return getAllInstancesOfKlasses(targetKlasses);
     }
 
     public static List<Object> getAllInstancesOfKlass(long targetKlass) {
+        return getAllInstancesOfKlasses(Collections.singleton(targetKlass));
+    }
+
+    public static List<Object> getAllInstancesOfKlasses(Set<Long> targetKlasses) {
 
         Set<Long> validKlasses = collectAllKlassAddrs();
 
@@ -99,7 +134,7 @@ public final class HeapScanner {
                     continue;
                 }
 
-                if (klass == targetKlass) {
+                if (targetKlasses.contains(klass)) {
                     if (compressedOop) {
                         int narrow = (int) ((cur - OopDesc.HEAP_BASE) >>> 3);
                         UnsafeUtils.unsafe.putInt(holderElemAddr, narrow);
@@ -116,6 +151,77 @@ public final class HeapScanner {
         }
 
         return result;
+    }
+
+    public static Set<Long> collectSuperclasses(long targetKlass) {
+        Set<Long> result = new LinkedHashSet<>();
+        long k = targetKlass;
+        int guard = 0;
+        while (k != 0 && guard++ < 256) {
+            if (!result.add(k)) break;
+            k = UnsafeUtils.unsafe.getLong(k + KLASS_SUPER_OFF);
+        }
+        return result;
+    }
+
+    public static Set<Long> collectSubclasses(long targetKlass) {
+        Set<Long> all = collectAllKlassAddrs();
+        Set<Long> result = new LinkedHashSet<>();
+        result.add(targetKlass);
+
+        for (long k : all) {
+            long cur = k;
+            int guard = 0;
+            while (cur != 0 && guard++ < 256) {
+                if (cur == targetKlass) {
+                    result.add(k);
+                    break;
+                }
+                cur = UnsafeUtils.unsafe.getLong(cur + KLASS_SUPER_OFF);
+            }
+        }
+        return result;
+    }
+
+    public static List<Class<?>> getSubclasses(Class<?> clazz) {
+        long target = new Klass(clazz).getAddress();
+        Set<Long> subs = collectSubclasses(target);
+        List<Class<?>> list = new ArrayList<>();
+        for (long k : subs) {
+            Class<?> c = klassToClass(k);
+            if (c != null) list.add(c);
+        }
+        return list;
+    }
+
+    public static List<Class<?>> getSuperclasses(Class<?> clazz) {
+        long target = new Klass(clazz).getAddress();
+        Set<Long> sups = collectSuperclasses(target);
+        List<Class<?>> list = new ArrayList<>();
+        for (long k : sups) {
+            Class<?> c = klassToClass(k);
+            if (c != null) list.add(c);
+        }
+        return list;
+    }
+
+    public static Class<?> klassToClass(long klassAddr) {
+        long mirror = UnsafeUtils.unsafe.getLong(klassAddr + KLASS_JAVA_MIRROR_OFF);
+        if (mirror == 0) return null;
+
+        Object[] holder = new Object[1];
+        long holderElemAddr = OopDesc.addressOf(holder)
+                + UnsafeUtils.unsafe.arrayBaseOffset(Object[].class);
+
+        if (OopDesc.USE_COMPRESSED_OOPS) {
+            int narrow = (int) ((mirror - OopDesc.HEAP_BASE) >>> 3);
+            UnsafeUtils.unsafe.putInt(holderElemAddr, narrow);
+        } else {
+            UnsafeUtils.unsafe.putLong(holderElemAddr, mirror);
+        }
+        Object o = holder[0];
+        holder[0] = null;
+        return (Class<?>) o;
     }
 
     public static Set<Long> collectAllKlassAddrs() {

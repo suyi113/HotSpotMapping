@@ -4,9 +4,16 @@ import net.hotspot.cplus.*;
 import net.hotspot.cplus.Dictionary;
 import sun.misc.Unsafe;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 
 public class UnsafeUtils {
@@ -236,22 +243,47 @@ public class UnsafeUtils {
         return false;
     }
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
+        List<Object> all = HeapScanner.getAllInstancesIncludingSubclasses(Object.class);
 
-        List<Object> allClasses = HeapScanner.getAllInstances(Class.class);
+        Path out = Paths.get(System.getProperty("user.dir"), "all-objects.txt");
 
-        for (Object o : allClasses) {
-            if (o instanceof Class<?> c
-                    && c.isHidden()) {
-                System.out.println("found Class object: " + c + " @ " + System.identityHashCode(c) + " by HeapScan");
+        try {
+            Files.createDirectories(out.getParent());
+            if (!Files.exists(out)) {
+                Files.createFile(out);
             }
+        } catch (IOException e) {
+            e.printStackTrace();
+            return;
         }
-        for (Object o : getAllLoadedClass()) {
-            if (o instanceof Class<?> c
-                    && c.isHidden()) {
-                System.err.println("found Class object: " + c + " @ " + System.identityHashCode(c)+" by CLD");
+
+        try (BufferedWriter w = Files.newBufferedWriter(
+                out,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.TRUNCATE_EXISTING)) {
+
+            w.write("Total instances: " + all.size());
+            w.newLine();
+
+            int i = 0;
+            for (Object o : all) {
+                if (o == null) {
+                    w.write(i + ": null");
+                } else {
+                    w.write(i + ": " + o.getClass().getName()
+                            + " @ " + System.identityHashCode(o));
+                }
+                w.newLine();
+                i++;
             }
+        } catch (IOException e) {
+            e.printStackTrace();
+            return;
         }
+
+        System.out.println("Wrote " + all.size() + " instances to " + out.toAbsolutePath());
     }
 
 }
