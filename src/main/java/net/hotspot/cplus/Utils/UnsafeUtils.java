@@ -1,6 +1,7 @@
 package net.hotspot.cplus.Utils;
 
 import net.hotspot.cplus.*;
+import net.hotspot.cplus.Dictionary;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Constructor;
@@ -195,6 +196,62 @@ public class UnsafeUtils {
         if (listAddr == 0) return new JavaThread[0];
         return new ThreadsList(listAddr).toJavaThreads();
     }
+    public static boolean unlinkFromCld(Class<?> target) {
+        InstanceKlass targetIk = new InstanceKlass(target);
+        long targetAddr = targetIk.getAddress();
 
+        long cldHeadAddr = VMStructsHelper.findStaticAddress("ClassLoaderDataGraph::_head");
+        long cldPtr = unsafe.getLong(cldHeadAddr);
+        long cldKlassesOff = VMStructsHelper.findOffset("ClassLoaderData::_klasses");
+        long cldNextOff    = VMStructsHelper.findOffset("ClassLoaderData::_next");
+        long kNextLinkOff  = VMStructsHelper.findOffset("Klass::_next_link");
+
+        Set<Long> seenCld = new HashSet<>();
+        while (cldPtr != 0) {
+            if (!seenCld.add(cldPtr)) break;
+
+            long headAddr = cldPtr + cldKlassesOff;
+            long cur = unsafe.getLong(headAddr);
+
+            if (cur == targetAddr) {
+                long next = unsafe.getLong(cur + kNextLinkOff);
+                unsafe.putLong(headAddr, next);
+                return true;
+            }
+
+            Set<Long> seen = new HashSet<>();
+            while (cur != 0) {
+                if (!seen.add(cur)) break;
+                long next = unsafe.getLong(cur + kNextLinkOff);
+                if (next == targetAddr) {
+                    long after = unsafe.getLong(targetAddr + kNextLinkOff);
+                    unsafe.putLong(cur + kNextLinkOff, after);
+                    return true;
+                }
+                cur = next;
+            }
+
+            cldPtr = unsafe.getLong(cldPtr + cldNextOff);
+        }
+        return false;
+    }
+
+    public static void main(String[] args) throws Exception {
+
+        List<Object> allClasses = HeapScanner.getAllInstances(Class.class);
+
+        for (Object o : allClasses) {
+            if (o instanceof Class<?> c
+                    && c.isHidden()) {
+                System.out.println("found Class object: " + c + " @ " + System.identityHashCode(c) + " by HeapScan");
+            }
+        }
+        for (Object o : getAllLoadedClass()) {
+            if (o instanceof Class<?> c
+                    && c.isHidden()) {
+                System.err.println("found Class object: " + c + " @ " + System.identityHashCode(c)+" by CLD");
+            }
+        }
+    }
 
 }
