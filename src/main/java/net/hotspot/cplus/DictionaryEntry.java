@@ -2,16 +2,7 @@ package net.hotspot.cplus;
 
 import net.hotspot.cplus.Utils.UnsafeUtils;
 
-/**
- * Java mapping of HotSpot's classfile/dictionary.hpp DictionaryEntry.
- *
- * class HashtableEntry<InstanceKlass*, mtClass> : CHeapObj<mtClass>  // no vptr
- *     +0   unsigned int       _hash
- *     +8   HashtableEntry*    _next
- *     +16  InstanceKlass*     _literal
- * class DictionaryEntry : HashtableEntry<InstanceKlass*, mtClass>
- *     +24  ProtectionDomainEntry* volatile _pd_set
- */
+
 public final class DictionaryEntry {
 
     private static final long MIN_VALID_ADDR = 0x0000_0001_0000L;

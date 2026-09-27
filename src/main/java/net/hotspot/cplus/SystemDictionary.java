@@ -61,7 +61,7 @@ public class SystemDictionary {
 
     public static InstanceKlass wellKnownKlassAt(int index) {
         if (WELL_KNOWN_KLASSES_ADDR == 0) {
-            throw new IllegalStateException("well_known_klasses 地址不可用");
+            throw new IllegalStateException("well_known_klasses Address not available");
         }
         if (index < 0 || index >= WK_KLASSES_MAX) {
             throw new IndexOutOfBoundsException("index: " + index);
@@ -136,7 +136,7 @@ public class SystemDictionary {
             if (k == 0) {
                 emptyRun++;
                 if (emptyRun > 5) {
-                    System.out.printf("[SystemDictionary]   ...(从 [%d] 起连续为空，停止)%n",
+                    System.out.printf("[SystemDictionary]   ...(Consecutive empty starting from [%d], stopping)%n",
                             i - emptyRun + 1);
                     break;
                 }
