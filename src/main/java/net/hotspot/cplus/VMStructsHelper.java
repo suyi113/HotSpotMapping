@@ -256,16 +256,6 @@ public final class VMStructsHelper {
                         e.name, e.value));
     }
 
-    // ============================================================
-    //  搜索
-    // ============================================================
-
-    /**
-     * 按子串搜字段/类型/常量名，大小写不敏感。
-     * 例：search("ClassLoaderData")
-     *     search("_dictionary")
-     *     search("DictionaryEntry")
-     */
     public static void search(String keyword) {
         ensureLoaded();
         String kw = keyword.toLowerCase(Locale.ROOT);
@@ -314,11 +304,6 @@ public final class VMStructsHelper {
                 nTypes, nFields, nInts, nLongs, nAddrs);
     }
 
-    /**
-     * 列出某个类型的所有字段。等价于 search 但更精确。
-     * 例：dumpType("ClassLoaderData")
-     *     dumpType("DictionaryEntry")
-     */
     public static void dumpType(String typeName) {
         ensureLoaded();
         System.out.printf("%n[VMS] ===== type %s =====%n", typeName);
@@ -355,7 +340,6 @@ public final class VMStructsHelper {
         }
     }
 
-    /** 把整个 dump 写成一个 Java 常量类，方便以后硬编码。 */
     public static String generateConstantsClass() {
         ensureLoaded();
         StringBuilder sb = new StringBuilder();

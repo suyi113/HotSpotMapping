@@ -1,11 +1,16 @@
 package net.hotspot.cplus.Utils;
 
+import com.sun.tools.attach.VirtualMachine;
+import com.sun.tools.attach.spi.AttachProvider;
 import net.hotspot.cplus.*;
 import net.hotspot.cplus.Dictionary;
+import net.hotspot.cplus.agent.AgentMain;
 import sun.misc.Unsafe;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.lang.instrument.UnmodifiableClassException;
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -244,7 +249,40 @@ public class UnsafeUtils {
     }
 
     public static void main(String[] args) {
+        VMStructsHelper.dumpAllFields();
 
     }
 
+    public static void AbleAgent() {
+        try {
+            Class<?> hotspot = Class.forName("sun.tools.attach.HotSpotVirtualMachine");
+            Field attach = hotspot.getDeclaredField("ALLOW_ATTACH_SELF");
+            setAccessible(attach, true);
+            unsafe.putBoolean(unsafe.staticFieldBase(attach), unsafe.staticFieldOffset(attach), true);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+
+    public static void loadAgent(String path){
+        try {
+            AbleAgent();
+            String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
+            int p = nameOfRunningVM.indexOf('@');
+            String pid = nameOfRunningVM.substring(0, p);
+            VirtualMachine vm = null;
+            Method providers = Class.forName("com.sun.tools.attach.spi.AttachProvider").getMethod("providers");
+            Method attachVirtualMachine = Class.forName("com.sun.tools.attach.spi.AttachProvider").getMethod("attachVirtualMachine", String.class);
+            for (AttachProvider provider:(List<AttachProvider>)providers.invoke(null)){
+                vm = (VirtualMachine) attachVirtualMachine.invoke(provider,pid);
+            }
+            Method loadAgent = Class.forName("com.sun.tools.attach.VirtualMachine").getMethod("loadAgent", String.class);
+            loadAgent.invoke(vm,path);
+            Method detach = Class.forName("com.sun.tools.attach.VirtualMachine").getMethod("detach");
+            detach.invoke(vm);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }

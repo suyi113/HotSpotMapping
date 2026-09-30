@@ -19,7 +19,7 @@ tasks.jar {
     manifest {
         attributes(
             "Premain-Class" to "net.hotspot.cplus.agent.AgentMain",
-            "Agent-Class" to "net.mcreator.warden.Agent.AgentMain",
+            "Agent-Class" to "net.hotspot.cplus.agent.AgentMain",
             "Can-Redefine-Classes" to "true",
             "Can-Retransform-Classes" to "true",
             "Implementation-Title" to "My Java Agent",

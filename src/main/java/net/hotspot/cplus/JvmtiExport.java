@@ -7,7 +7,7 @@ public final class JvmtiExport {
 
     private JvmtiExport() {}
 
-    private static final long ANCHOR =
+    public static final long ANCHOR =
             VMStructsHelper.findStaticAddress("JvmtiExport::_can_access_local_variables");
 
     private static final long A_LOCAL_VARS =
@@ -61,9 +61,9 @@ public final class JvmtiExport {
     private static final long OFF_SHOULD_CLEAN_UP_HEAP_OBJECTS        = 38;
     private static final long OFF_SHOULD_POST_VM_OBJECT_ALLOC         = 39;
     private static final long OFF_SHOULD_POST_SAMPLED_OBJECT_ALLOC    = 40;
-    private static final long OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK = 42;
+    public static final  long OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK = 42;
 
-    private static boolean flag(long off) {
+    public static boolean flag(long off) {
         return UnsafeUtils.unsafe.getByte(ANCHOR + off) != 0;
     }
 
@@ -110,7 +110,41 @@ public final class JvmtiExport {
     public static boolean shouldPostVmObjectAlloc()        { return flag(OFF_SHOULD_POST_VM_OBJECT_ALLOC); }
     public static boolean shouldPostSampledObjectAlloc()   { return flag(OFF_SHOULD_POST_SAMPLED_OBJECT_ALLOC); }
     public static boolean shouldPostClassFileLoadHook()    { return flag(OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK);}
+    public static void disableShouldPostClassFileLoadHook() {
+        UnsafeUtils.unsafe.putByte(
+                ANCHOR + OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK,
+                (byte) 0
+        );
+    }
 
+    public static void enableShouldPostClassFileLoadHook() {
+        UnsafeUtils.unsafe.putByte(
+                ANCHOR + OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK,
+                (byte) 1
+        );
+    }
+
+    public static void setShouldPostClassFileLoadHook(boolean enable) {
+        UnsafeUtils.unsafe.putByte(
+                ANCHOR + OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK,
+                (byte) (enable ? 1 : 0)
+        );
+    }
+    public static long resolveAnchor() {
+        return VMStructsHelper.findStaticAddress("JvmtiExport::_can_access_local_variables");
+    }
+
+    public static boolean flagLive(long off) {
+        return UnsafeUtils.unsafe.getByte(resolveAnchor() + off) != 0;
+    }
+
+    public static boolean shouldPostClassFileLoadHookLive() {
+        return flagLive(OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK);
+    }
+
+    public static void disableShouldPostClassFileLoadHookLive() {
+        UnsafeUtils.unsafe.putByte(resolveAnchor() + OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK, (byte) 0);
+    }
     public static long fieldAddress(long off) {
         return ANCHOR + off;
     }
