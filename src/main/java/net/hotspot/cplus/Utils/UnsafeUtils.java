@@ -208,6 +208,7 @@ public class UnsafeUtils {
         if (listAddr == 0) return new JavaThread[0];
         return new ThreadsList(listAddr).toJavaThreads();
     }
+
     public static boolean unlinkFromCld(Class<?> target) {
         InstanceKlass targetIk = new InstanceKlass(target);
         long targetAddr = targetIk.getAddress();
@@ -249,8 +250,10 @@ public class UnsafeUtils {
     }
 
     public static void main(String[] args) {
-        VMStructsHelper.dumpAllFields();
-
+        List<Thread> threads = getAllThreads();
+        for (Thread thread:threads){
+            System.out.println(thread);
+        }
     }
 
     public static void AbleAgent() {

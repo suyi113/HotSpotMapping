@@ -107,9 +107,6 @@ public final class VMStructsHelper {
         }
     }
 
-    // ============================================================
-    //  原有 API
-    // ============================================================
 
     public static long findOffset(String typeAndField) {
         ensureLoaded();
