@@ -43,7 +43,7 @@ public class DataLayoutMirror {
     public void setIntAt(int index, int v)   { setCellAt(index, v); }
 
     public int sizeInBytes() {
-        return sizeInBytesFor(MethodDataMirror.cellCountFor(this));
+        return sizeInBytesFor(MethodData.cellCountFor(this));
     }
     public int sizeInBytesFor(int cellCount) {
         return (HEADER_CELLS + cellCount) * 8;
@@ -66,19 +66,19 @@ public class DataLayoutMirror {
         UnsafeUtils.unsafe.putInt(address + TRAPS_OFFSET, (int) v);
     }
 
-    public boolean isBitData()             { return tag == MethodDataMirror.TAG_BIT_DATA; }
-    public boolean isCounterData()         { return tag == MethodDataMirror.TAG_COUNTER_DATA; }
-    public boolean isJumpData()            { return tag == MethodDataMirror.TAG_JUMP_DATA; }
-    public boolean isReceiverTypeData()    { return tag == MethodDataMirror.TAG_RECEIVER_TYPE_DATA; }
-    public boolean isVirtualCallData()     { return tag == MethodDataMirror.TAG_VIRTUAL_CALL_DATA; }
-    public boolean isRetData()             { return tag == MethodDataMirror.TAG_RET_DATA; }
-    public boolean isBranchData()          { return tag == MethodDataMirror.TAG_BRANCH_DATA; }
-    public boolean isMultiBranchData()     { return tag == MethodDataMirror.TAG_MULTI_BRANCH_DATA; }
-    public boolean isArgInfoData()         { return tag == MethodDataMirror.TAG_ARG_INFO_DATA; }
-    public boolean isCallTypeData()        { return tag == MethodDataMirror.TAG_CALL_TYPE_DATA; }
-    public boolean isVirtualCallTypeData() { return tag == MethodDataMirror.TAG_VIRTUAL_CALL_TYPE_DATA; }
-    public boolean isParametersTypeData()  { return tag == MethodDataMirror.TAG_PARAMETERS_TYPE_DATA; }
-    public boolean isSpeculativeTrapData() { return tag == MethodDataMirror.TAG_SPECULATIVE_TRAP_DATA; }
+    public boolean isBitData()             { return tag == MethodData.TAG_BIT_DATA; }
+    public boolean isCounterData()         { return tag == MethodData.TAG_COUNTER_DATA; }
+    public boolean isJumpData()            { return tag == MethodData.TAG_JUMP_DATA; }
+    public boolean isReceiverTypeData()    { return tag == MethodData.TAG_RECEIVER_TYPE_DATA; }
+    public boolean isVirtualCallData()     { return tag == MethodData.TAG_VIRTUAL_CALL_DATA; }
+    public boolean isRetData()             { return tag == MethodData.TAG_RET_DATA; }
+    public boolean isBranchData()          { return tag == MethodData.TAG_BRANCH_DATA; }
+    public boolean isMultiBranchData()     { return tag == MethodData.TAG_MULTI_BRANCH_DATA; }
+    public boolean isArgInfoData()         { return tag == MethodData.TAG_ARG_INFO_DATA; }
+    public boolean isCallTypeData()        { return tag == MethodData.TAG_CALL_TYPE_DATA; }
+    public boolean isVirtualCallTypeData() { return tag == MethodData.TAG_VIRTUAL_CALL_TYPE_DATA; }
+    public boolean isParametersTypeData()  { return tag == MethodData.TAG_PARAMETERS_TYPE_DATA; }
+    public boolean isSpeculativeTrapData() { return tag == MethodData.TAG_SPECULATIVE_TRAP_DATA; }
 
     public int  counterCount()            { return intAt(0); }
     public boolean nullSeen()             { return (flags & 0x01) != 0; }

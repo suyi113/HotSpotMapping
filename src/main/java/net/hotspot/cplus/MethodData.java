@@ -12,7 +12,7 @@ import static net.hotspot.cplus.VMStructsHelper.findOffsetOrDefault;
  * 字段偏移优先从 VMStructs 拿，拿不到时回退到源码推算的常量。
  * 条件编译字段（RTM/JVMCI）不存在时偏移量为 -1，对应字段值为 -1 或 0。
  */
-public class MethodDataMirror {
+public class MethodData {
 
     // ---------- MethodData 字段偏移 ----------
     private static final long METHOD_OFFSET            = findOffsetOrDefault("MethodData::_method",                    8L);
@@ -90,7 +90,7 @@ public class MethodDataMirror {
 
     private long address;
 
-    public MethodDataMirror(long address) {
+    public MethodData(long address) {
         this.address = address;
         readFields();
     }

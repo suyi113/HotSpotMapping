@@ -11,6 +11,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.lang.instrument.UnmodifiableClassException;
 import java.lang.management.ManagementFactory;
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -249,12 +250,21 @@ public class UnsafeUtils {
         return false;
     }
 
-    public static void main(String[] args) {
-        List<Thread> threads = getAllThreads();
-        for (Thread thread:threads){
-            System.out.println(thread);
+    public static void main(String[] args) throws Exception {
+        InstanceKlass klass = new InstanceKlass(AccessibleObject.class);
+        net.hotspot.cplus.Method target = null;
+        for (net.hotspot.cplus.Method m : klass.methodsArray().toMethods()) {
+            if ("checkCanSetAccessible".equals(m.name())
+                    && "(Ljava/lang/Class;Ljava/lang/Class;Z)Z".equals(m.signature())) {
+                target = m;
+                break;
+            }
         }
+        System.out.println(target);
+        MethodDa
+
     }
+
 
     public static void AbleAgent() {
         try {
