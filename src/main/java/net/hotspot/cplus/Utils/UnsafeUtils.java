@@ -250,22 +250,6 @@ public class UnsafeUtils {
         return false;
     }
 
-    public static void main(String[] args) throws Exception {
-        InstanceKlass klass = new InstanceKlass(AccessibleObject.class);
-        net.hotspot.cplus.Method target = null;
-        for (net.hotspot.cplus.Method m : klass.methodsArray().toMethods()) {
-            if ("checkCanSetAccessible".equals(m.name())
-                    && "(Ljava/lang/Class;Ljava/lang/Class;Z)Z".equals(m.signature())) {
-                target = m;
-                break;
-            }
-        }
-        System.out.println(target);
-        MethodDa
-
-    }
-
-
     public static void AbleAgent() {
         try {
             Class<?> hotspot = Class.forName("sun.tools.attach.HotSpotVirtualMachine");

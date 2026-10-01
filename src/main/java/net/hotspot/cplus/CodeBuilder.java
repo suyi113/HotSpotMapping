@@ -54,6 +54,20 @@ public class CodeBuilder {
         }
     }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     private void emit(int b) {
         ensure(1);
         buffer[length++] = (byte) (b & 0xFF);
@@ -61,40 +75,50 @@ public class CodeBuilder {
 
     private void emit2(int v) {
         ensure(2);
-        buffer[length++] = (byte) ((v >>> 8) & 0xFF);
         buffer[length++] = (byte) (v & 0xFF);
+        buffer[length++] = (byte) ((v >>> 8) & 0xFF);
     }
 
     private void emit2LE(int v) {
-        ensure(2);
-        buffer[length++] = (byte) (v & 0xFF);
-        buffer[length++] = (byte) ((v >>> 8) & 0xFF);
+        emit2(v);
     }
 
     private void emit4(int v) {
         ensure(4);
-        buffer[length++] = (byte) ((v >>> 24) & 0xFF);
-        buffer[length++] = (byte) ((v >>> 16) & 0xFF);
-        buffer[length++] = (byte) ((v >>> 8) & 0xFF);
         buffer[length++] = (byte) (v & 0xFF);
+        buffer[length++] = (byte) ((v >>> 8) & 0xFF);
+        buffer[length++] = (byte) ((v >>> 16) & 0xFF);
+        buffer[length++] = (byte) ((v >>> 24) & 0xFF);
     }
 
     private void patch2(int pos, int v) {
-        buffer[pos]     = (byte) ((v >>> 8) & 0xFF);
-        buffer[pos + 1] = (byte) (v & 0xFF);
-    }
-
-    private void patch2LE(int pos, int v) {
         buffer[pos]     = (byte) (v & 0xFF);
         buffer[pos + 1] = (byte) ((v >>> 8) & 0xFF);
     }
 
-    private void patch4(int pos, int v) {
-        buffer[pos]     = (byte) ((v >>> 24) & 0xFF);
-        buffer[pos + 1] = (byte) ((v >>> 16) & 0xFF);
-        buffer[pos + 2] = (byte) ((v >>> 8) & 0xFF);
-        buffer[pos + 3] = (byte) (v & 0xFF);
+    private void patch2LE(int pos, int v) {
+        patch2(pos, v);
     }
+
+    private void patch4(int pos, int v) {
+        buffer[pos]     = (byte) (v & 0xFF);
+        buffer[pos + 1] = (byte) ((v >>> 8) & 0xFF);
+        buffer[pos + 2] = (byte) ((v >>> 16) & 0xFF);
+        buffer[pos + 3] = (byte) ((v >>> 24) & 0xFF);
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     public Label newLabel() {
         return new Label(nextLabelId++);

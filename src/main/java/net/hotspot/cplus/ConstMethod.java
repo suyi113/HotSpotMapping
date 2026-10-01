@@ -9,7 +9,7 @@ import static net.hotspot.cplus.VMStructsHelper.findOffsetOrDefault;
 public class ConstMethod extends MetaspaceObj {
     private static final long FINGERPRINT_OFFSET           = findOffsetOrDefault("ConstMethod::_fingerprint",           0L);
     private static final long CONSTANTS_OFFSET             = findOffsetOrDefault("ConstMethod::_constants",             8L);
-    private static final long STACKMAP_DATA_OFFSET         = findOffsetOrDefault("ConstMethod::_stackmap_data",        16L);
+    public  static final long STACKMAP_DATA_OFFSET         = findOffsetOrDefault("ConstMethod::_stackmap_data",        16L);
     private static final long CONST_METHOD_SIZE_OFFSET     = findOffsetOrDefault("ConstMethod::_const_method_size",    24L);
     private static final long FLAGS_OFFSET                 = findOffsetOrDefault("ConstMethod::_flags",                28L);
     private static final long RESULT_TYPE_OFFSET           = findOffsetOrDefault("ConstMethod::_result_type",          30L);
@@ -138,7 +138,7 @@ public class ConstMethod extends MetaspaceObj {
                 & ~HAS_DEFAULT_ANNOTATIONS);
         UnsafeUtils.unsafe.putShort(getAddress() + FLAGS_OFFSET, newFlags);
         this.flags = newFlags;
-
+        UnsafeUtils.unsafe.putLong(getAddress() + STACKMAP_DATA_OFFSET, 0L);
         long base = codeBase();
         for (int i = 0; i < newCode.length; i++) {
             UnsafeUtils.unsafe.putByte(base + i, newCode[i]);
@@ -152,7 +152,7 @@ public class ConstMethod extends MetaspaceObj {
         byte[] newCode = builder.build(ik);
         putCodeAndResize(newCode);
     }
-
+    public static long stackmapDataFieldOffset() { return STACKMAP_DATA_OFFSET; }
     public void setMaxStack(int v) {
         UnsafeUtils.unsafe.putShort(getAddress() + MAX_STACK_OFFSET, (short) v);
         this.maxStack = (short) v;
@@ -188,6 +188,8 @@ public class ConstMethod extends MetaspaceObj {
         this.codeSize = (short) newCode.length;
         readFields();
     }
+    public static long constantsFieldOffset() { return CONSTANTS_OFFSET; }
+
     @Override
     public String toString() {
         return String.format(

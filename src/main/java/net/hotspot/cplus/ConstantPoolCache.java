@@ -7,10 +7,10 @@ import static net.hotspot.cplus.VMStructsHelper.findOffsetOrDefault;
 
 public class ConstantPoolCache extends MetaspaceObj{
 
-    private static final long LENGTH_OFFSET              = findOffsetOrDefault("ConstantPool::_length",               0L);
-    private static final long CONSTANT_POOL_OFFSET       = findOffsetOrDefault("ConstantPool::_constant_pool",        8L);
-    private static final long RESOLVED_REFERENCES_OFFSET = findOffsetOrDefault("ConstantPool::_resolved_references", 16L);
-    private static final long REFERENCE_MAP_OFFSET       = findOffsetOrDefault("ConstantPool::_reference_map",       24L);
+    public  static final long LENGTH_OFFSET              = findOffsetOrDefault("ConstantPoolCache::_length",               0L);
+    public  static final long CONSTANT_POOL_OFFSET       = findOffsetOrDefault("ConstantPool::_constant_pool",        8L);
+    public  static final long RESOLVED_REFERENCES_OFFSET = findOffsetOrDefault("ConstantPool::_resolved_references", 16L);
+    public  static final long REFERENCE_MAP_OFFSET       = findOffsetOrDefault("ConstantPool::_reference_map",       24L);
 
     public  static final long HEADER_SIZE = 32L;
 

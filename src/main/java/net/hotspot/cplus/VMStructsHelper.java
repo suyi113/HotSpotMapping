@@ -144,9 +144,6 @@ public final class VMStructsHelper {
         return TYPES.get(typeName);
     }
 
-    // ============================================================
-    //  新增 API
-    // ============================================================
 
     public static Integer findIntConstant(String name) {
         ensureLoaded();

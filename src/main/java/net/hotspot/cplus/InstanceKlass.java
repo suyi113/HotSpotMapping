@@ -1,7 +1,4 @@
-
 package net.hotspot.cplus;
-
-
 
 import net.hotspot.cplus.Utils.UnsafeUtils;
 
@@ -13,8 +10,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static net.hotspot.cplus.VMStructsHelper.findOffsetOrDefault;
 
-
 public class InstanceKlass extends Klass {
+
     private static final long ANNOTATIONS_OFFSET                  = findOffsetOrDefault("InstanceKlass::_annotations",                  200L);
     private static final long PACKAGE_ENTRY_OFFSET                = findOffsetOrDefault("InstanceKlass::_package_entry",                208L);
     private static final long ARRAY_KLASSES_OFFSET                = findOffsetOrDefault("InstanceKlass::_array_klasses",                216L);
@@ -56,7 +53,9 @@ public class InstanceKlass extends Klass {
     private static final long TRANSITIVE_INTERFACES_OFFSET        = findOffsetOrDefault("InstanceKlass::_transitive_interfaces",        424L);
     private static final long METHOD_ORDERING_OFFSET              = findOffsetOrDefault("InstanceKlass::_method_ordering",              432L);
     private static final long DEFAULT_VTABLE_INDICES_OFFSET       = findOffsetOrDefault("InstanceKlass::_default_vtable_indices",       440L);
-    private static final long FIELDS_OFFSET                       = findOffsetOrDefault("InstanceKlass::_fields",                       448L);    private static final int INIT_STATE_ALLOCATED            = 0;
+    private static final long FIELDS_OFFSET                       = findOffsetOrDefault("InstanceKlass::_fields",                       448L);
+
+    private static final int INIT_STATE_ALLOCATED            = 0;
     private static final int INIT_STATE_LOADED               = 1;
     private static final int INIT_STATE_LINKED               = 2;
     private static final int INIT_STATE_BEING_INITIALIZED    = 3;
@@ -212,7 +211,7 @@ public class InstanceKlass extends Klass {
         });
     }
 
-    private void readFields() {
+    public void readFields() {
         long base = getAddress();
         annotations = UnsafeUtils.unsafe.getLong(base + ANNOTATIONS_OFFSET);
         packageEntry = UnsafeUtils.unsafe.getLong(base + PACKAGE_ENTRY_OFFSET);
@@ -376,8 +375,7 @@ public class InstanceKlass extends Klass {
 
         long symAddr = resolveSymbol(s, donors);
         if (symAddr == 0) {
-            throw new IllegalStateException("Can't find string in JVM symbol table:: " + s
-                    + "（Please add the classes that referenced it into donors.）");
+            throw new IllegalStateException("Cannot find string in JVM symbol table: " + s);
         }
         int idx = expandedLength;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_UTF8);
@@ -389,42 +387,72 @@ public class InstanceKlass extends Klass {
         return idx;
     }
 
-    private int appendResolvedKlass(long klassAddr) {
+    private void ensureResolvedKlassesCapacity(int rkIndex) {
         if (expandedResolvedKlassesAddr == 0L) {
-            long oldAddr = UnsafeUtils.unsafe.getLong(expandedCpAddr + 40L);
-            int  oldLen  = (oldAddr == 0) ? 0 : UnsafeUtils.unsafe.getInt(oldAddr);
+            long oldArr = UnsafeUtils.unsafe.getLong(expandedCpAddr + 40L);
+            int  oldLen = (oldArr == 0) ? 0 : UnsafeUtils.unsafe.getInt(oldArr);
 
-            int newLen  = oldLen + 32;
+            int newLen = Math.max(oldLen, rkIndex + 1) + 32;
             long newSize = 8L + (long) newLen * 8L;
             long newAddr = UnsafeUtils.unsafe.allocateMemory(newSize);
             for (long i = 0; i < newSize; i++) {
                 UnsafeUtils.unsafe.putByte(newAddr + i, (byte) 0);
             }
             UnsafeUtils.unsafe.putInt(newAddr, newLen);
-            for (int i = 0; i < oldLen; i++) {
-                long v = UnsafeUtils.unsafe.getLong(oldAddr + 8L + i * 8L);
-                UnsafeUtils.unsafe.putLong(newAddr + 8L + i * 8L, v);
+            if (oldArr != 0) {
+                int copyLen = Math.min(oldLen, newLen);
+                for (int i = 0; i < copyLen; i++) {
+                    long v = UnsafeUtils.unsafe.getLong(oldArr + 8L + (long) i * 8L);
+                    UnsafeUtils.unsafe.putLong(newAddr + 8L + (long) i * 8L, v);
+                }
             }
             UnsafeUtils.unsafe.putLong(expandedCpAddr + 40L, newAddr);
-
             expandedResolvedKlassesAddr = newAddr;
             expandedResolvedKlassesLength = oldLen;
+            publishExpandedState();
+            System.out.printf("[CP] rkArray init: 0x%x len=%d%n", newAddr, newLen);
+            return;
         }
 
-        int idx = expandedResolvedKlassesLength;
-        UnsafeUtils.unsafe.putLong(expandedResolvedKlassesAddr + 8L + idx * 8L, klassAddr);
-        expandedResolvedKlassesLength++;
-        UnsafeUtils.unsafe.putInt(expandedResolvedKlassesAddr, expandedResolvedKlassesLength);
+        int currentLen = UnsafeUtils.unsafe.getInt(expandedResolvedKlassesAddr);
+        if (rkIndex < currentLen) return;
+
+        int newLen = Math.max(currentLen * 2, rkIndex + 32);
+        long newSize = 8L + (long) newLen * 8L;
+        long newAddr = UnsafeUtils.unsafe.allocateMemory(newSize);
+        for (long i = 0; i < newSize; i++) {
+            UnsafeUtils.unsafe.putByte(newAddr + i, (byte) 0);
+        }
+        UnsafeUtils.unsafe.putInt(newAddr, newLen);
+        for (int i = 0; i < currentLen; i++) {
+            long v = UnsafeUtils.unsafe.getLong(expandedResolvedKlassesAddr + 8L + (long) i * 8L);
+            UnsafeUtils.unsafe.putLong(newAddr + 8L + (long) i * 8L, v);
+        }
+        UnsafeUtils.unsafe.putLong(expandedCpAddr + 40L, newAddr);
+        expandedResolvedKlassesAddr = newAddr;
         publishExpandedState();
-        System.out.printf("[CP] rklass idx=%d klass=0x%x rkAddr=0x%x len=%d%n",
-                idx, klassAddr, expandedResolvedKlassesAddr, expandedResolvedKlassesLength);
-        return idx;
+        System.out.printf("[CP] rkArray grow: 0x%x len %d -> %d%n",
+                newAddr, currentLen, newLen);
+    }
+
+    private void putResolvedKlass(int rkIndex, long klassAddr) {
+        if (expandedResolvedKlassesAddr == 0L) {
+            throw new IllegalStateException("rkArray not initialized");
+        }
+        UnsafeUtils.unsafe.putLong(
+                expandedResolvedKlassesAddr + 8L + (long) rkIndex * 8L,
+                klassAddr);
+        if (rkIndex >= expandedResolvedKlassesLength) {
+            expandedResolvedKlassesLength = rkIndex + 1;
+        }
+        publishExpandedState();
+        System.out.printf("[CP] rklass[rkIdx=%d] klass=0x%x%n", rkIndex, klassAddr);
     }
 
     public int addClass(String className, Class<?>... donors) {
         long klassAddr = findKlassByDonors(className, donors);
         if (klassAddr == 0) {
-            throw new IllegalStateException("Class not found " + className + "，Please pass its Class in donors");
+            throw new IllegalStateException("Class not found: " + className);
         }
         ensureCpCapacity(1);
 
@@ -432,20 +460,19 @@ public class InstanceKlass extends Klass {
         if (existing > 0) return existing;
 
         int nameIdx = addUtf8(className, donors);
-        int rkIndex = appendResolvedKlass(klassAddr);
+
+        int rkIndex = expandedResolvedKlassesLength;
+        ensureResolvedKlassesCapacity(rkIndex);
+        putResolvedKlass(rkIndex, klassAddr);
 
         int idx = expandedLength;
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_CLASS);
-        UnsafeUtils.unsafe.putShort(base,      (short) nameIdx);
-        UnsafeUtils.unsafe.putShort(base + 2L, (short) rkIndex);
-        System.out.printf("[CP] Class  #%d nameIdx=%d rkIdx=%d klass=0x%x bytes=[%02x%02x %02x%02x] \"%s\"%n",
-                idx, nameIdx, rkIndex, klassAddr,
-                UnsafeUtils.unsafe.getByte(base) & 0xFF,
-                UnsafeUtils.unsafe.getByte(base + 1) & 0xFF,
-                UnsafeUtils.unsafe.getByte(base + 2) & 0xFF,
-                UnsafeUtils.unsafe.getByte(base + 3) & 0xFF,
-                className);
+        UnsafeUtils.unsafe.putShort(base,      (short) rkIndex);
+        UnsafeUtils.unsafe.putShort(base + 2L, (short) nameIdx);
+
+        System.out.printf("[CP] Class  #%d nameIdx=%d rkIdx=%d klass=0x%x \"%s\"%n",
+                idx, nameIdx, rkIndex, klassAddr, className);
         bumpLength();
         readFields();
         return idx;
@@ -482,15 +509,14 @@ public class InstanceKlass extends Klass {
                 : expandedTagsAddr + TAGS_HEADER;
         for (int i = from; i < to; i++) {
             int tag = UnsafeUtils.unsafe.getByte(tagsData + i) & 0xFF;
-            if (tag == TAG_CLASS || tag == 100) {
+            if (tag == TAG_CLASS) {
                 long slot = (cp != null)
                         ? cp.slotAt(i)
                         : UnsafeUtils.unsafe.getLong(expandedCpAddr + HEADER_SIZE + i * 8L);
                 int rkIdx = (int) (slot & 0xFFFF);
-                long k = UnsafeUtils.unsafe.getLong(resolvedKlassesAddr + 8L + rkIdx * 8L);
+                long k = UnsafeUtils.unsafe.getLong(resolvedKlassesAddr + 8L + (long) rkIdx * 8L);
                 if (k == klassAddr) {
-                    System.out.printf("[CP] findClass hit i=%d rkIdx=%d tag=%d slot=0x%x%n",
-                            i, rkIdx, tag, slot);
+                    System.out.printf("[CP] findClass hit cpIdx=%d rkIdx=%d%n", i, rkIdx);
                     return i;
                 }
             }
@@ -503,15 +529,13 @@ public class InstanceKlass extends Klass {
         int nameIdx = addUtf8(name, donors);
         int descIdx = addUtf8(desc, donors);
         ensureCpCapacity(1);
-        int existing = findExistingNat(nameIdx, descIdx);
-        if (existing > 0) return existing;
-
+        // 不查 findExistingNat，直接新建
         int idx = expandedLength;
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_NAMEANDTYPE);
         UnsafeUtils.unsafe.putShort(base,      (short) nameIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) descIdx);
-        System.out.printf("[CP] NAT    #%d nameIdx=%d descIdx=%d name=\"%s\" desc=\"%s\"%n",
+        System.out.printf("[CP] NAT #%d (FORCE-NEW) nameIdx=%d descIdx=%d name=\"%s\" desc=\"%s\"%n",
                 idx, nameIdx, descIdx, name, desc);
         bumpLength();
         readFields();
@@ -522,20 +546,16 @@ public class InstanceKlass extends Klass {
         int classIdx = addClass(owner, donors);
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
-        int existing = findExistingRef(TAG_FIELDREF, classIdx, natIdx);
-        if (existing > 0) {
-            System.out.printf("[CP] Field  #%d (reuse) classIdx=%d natIdx=%d %s.%s%s%n",
-                    existing, classIdx, natIdx, owner, name, desc);
-            return existing;
-        }
-
+        // 不查 findExistingRef，直接新建
         int idx = expandedLength;
+        ensureCpCacheHasIndex(idx);
+        initCacheEntryIndices(idx, idx);
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_FIELDREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
-        System.out.printf("[CP] Field  #%d classIdx=%d natIdx=%d %s.%s%s%n",
-                idx, classIdx, natIdx, owner, name, desc);
+        System.out.printf("[CP] Field #%d (FORCE-NEW) classIdx=%d natIdx=%d%n",
+                idx, classIdx, natIdx);
         bumpLength();
         readFields();
         return idx;
@@ -553,6 +573,9 @@ public class InstanceKlass extends Klass {
         }
 
         int idx = expandedLength;
+        ensureCpCacheHasIndex(idx);
+        initCacheEntryIndices(idx, idx);
+
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_METHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
@@ -576,6 +599,9 @@ public class InstanceKlass extends Klass {
         }
 
         int idx = expandedLength;
+        ensureCpCacheHasIndex(idx);
+        initCacheEntryIndices(idx, idx);
+
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_INTERFACEMETHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
@@ -585,6 +611,37 @@ public class InstanceKlass extends Klass {
         bumpLength();
         readFields();
         return idx;
+    }
+
+    private void ensureCpCacheHasIndex(int idx) {
+        ConstantPool cp = new ConstantPool(currentCpAddress());
+        ConstantPoolCache cpc = cp.getCache();
+        if (cpc == null) {
+            throw new IllegalStateException("CPC is null");
+        }
+        if (idx >= cpc.length) {
+            ensureCpCacheCapacity(idx - cpc.length + 1);
+        }
+    }
+
+    private void initCacheEntryIndices(int cpcIdx, int cpIdx) {
+        ConstantPool cp = new ConstantPool(currentCpAddress());
+        ConstantPoolCache cpc = cp.getCache();
+        if (cpc == null) {
+            throw new IllegalStateException("CPC is null");
+        }
+        if (cpcIdx >= cpc.length) {
+            ensureCpCacheCapacity(cpcIdx - cpc.length + 1);
+            cpc = new ConstantPool(currentCpAddress()).getCache();
+        }
+        long entryAddr = cpc.entryAddr(cpcIdx);
+        for (int k = 0; k < ConstantPoolCache.ENTRY_SIZE; k++) {
+            UnsafeUtils.unsafe.putByte(entryAddr + k, (byte) 0);
+        }
+        UnsafeUtils.unsafe.putInt(
+                entryAddr + ConstantPoolCache.ENTRY_INDICES_OFFSET,
+                cpIdx & 0xFFFF);
+        System.out.printf("[CP] initCacheEntry[%d]._indices = %d%n", cpcIdx, cpIdx);
     }
 
     public int addCacheEntry(int cpIndex) {
@@ -622,7 +679,6 @@ public class InstanceKlass extends Klass {
         CACHE_NEXT.put(getAddress(), idx + 1);
         return idx;
     }
-
 
     public int addResolvedFieldEntry(
             int cpIndex,
@@ -690,13 +746,6 @@ public class InstanceKlass extends Klass {
                 rbF1, rbF2, rbFl);
 
         CACHE_NEXT.put(getAddress(), idx + 1);
-        long p = cpc.entryAddr(idx);
-        System.out.printf("[FIELD] idx=%d%n", idx);
-        System.out.printf("  ind  = %016x%n", UnsafeUtils.unsafe.getLong(p));
-        System.out.printf("  f1   = %016x%n", UnsafeUtils.unsafe.getLong(p + 8));
-        System.out.printf("  f2   = %016x (%d)%n",
-                UnsafeUtils.unsafe.getLong(p + 16), UnsafeUtils.unsafe.getLong(p + 16));
-        System.out.printf("  flags= %016x%n", UnsafeUtils.unsafe.getLong(p + 24));
         return idx;
     }
 
@@ -706,13 +755,29 @@ public class InstanceKlass extends Klass {
             return;
         }
 
-        ConstantPool oldCp = new ConstantPool(constants);
-        ConstantPoolCache cpc = oldCp.getCache();
-        System.out.printf("[CP] commit: oldCp=0x%x oldLen=%d newCp=0x%x newLen=%d cpc=0x%x cpcLen=%d%n",
-                oldCp.getAddress(), oldCp.length,
+        ConstantPool      preCp  = new ConstantPool(expandedCpAddr);
+        ConstantPoolCache preCpc = preCp.getCache();
+        int oldCpcLen = preCpc == null ? 0 : preCpc.length;
+
+        System.out.printf("[CP] commit: pre-check cpcLen=%d, needLen=%d%n",
+                oldCpcLen, expandedLength);
+
+        if (oldCpcLen < expandedLength) {
+            int grow = expandedLength - oldCpcLen;
+            System.out.printf("[CP] commit: growing CPC by %d%n", grow);
+            ensureCpCacheCapacity(grow);
+        }
+
+        ConstantPool      oldCp     = new ConstantPool(constants);
+        long              oldCpAddr = oldCp.getAddress();
+        ConstantPoolCache oldCpc    = oldCp.getCache();
+
+        System.out.printf(
+                "[CP] commit: oldCp=0x%x oldLen=%d newCp=0x%x newLen=%d oldCpc=0x%x oldCpcLen=%d%n",
+                oldCpAddr, oldCp.length,
                 expandedCpAddr, expandedLength,
-                cpc == null ? 0L : cpc.getAddress(),
-                cpc == null ? -1 : cpc.length);
+                oldCpc == null ? 0L : oldCpc.getAddress(),
+                oldCpc == null ? -1 : oldCpc.length);
 
         UnsafeUtils.unsafe.putLong(getAddress() + CONSTANTS_OFFSET, expandedCpAddr);
         this.constants = expandedCpAddr;
@@ -720,17 +785,55 @@ public class InstanceKlass extends Klass {
         int rewritten = 0;
         for (Method m : methodsArray().toMethods()) {
             if (m.constMethod != 0) {
-                UnsafeUtils.unsafe.putLong(m.constMethod + 8L, expandedCpAddr);
+                UnsafeUtils.unsafe.putLong(
+                        m.constMethod + ConstMethod.constantsFieldOffset(),
+                        expandedCpAddr);
                 rewritten++;
             }
         }
         System.out.printf("[CP] commit: rewrote %d ConstMethod.constants%n", rewritten);
 
-        ConstantPoolCache newCpc = new ConstantPool(currentCpAddress()).getCache();
+        ConstantPool      newCp  = new ConstantPool(currentCpAddress());
+        ConstantPoolCache newCpc = newCp.getCache();
+
         if (newCpc != null) {
-            UnsafeUtils.unsafe.putLong(newCpc.getAddress() + 8L, expandedCpAddr);
-            System.out.printf("[CP] commit: new cpc.constant_pool -> 0x%x%n", expandedCpAddr);
+            UnsafeUtils.unsafe.putLong(
+                    newCpc.getAddress() + ConstantPoolCache.CONSTANT_POOL_OFFSET,
+                    expandedCpAddr);
+            System.out.printf("[CP] commit: newCpc=0x%x constant_pool -> 0x%x%n",
+                    newCpc.getAddress(), expandedCpAddr);
+        } else {
+            System.out.println("[CP] commit: newCpc == null, skip step 4");
         }
+
+        long oldCacheFieldAddr = oldCpAddr + ConstantPool.CACHE_OFFSET;
+        if (newCpc != null) {
+            UnsafeUtils.unsafe.putLong(oldCacheFieldAddr, newCpc.getAddress());
+            System.out.printf("[CP] commit: oldCp._cache @ 0x%x -> 0x%x%n",
+                    oldCacheFieldAddr, newCpc.getAddress());
+        } else {
+            UnsafeUtils.unsafe.putLong(oldCacheFieldAddr, 0L);
+            System.out.printf("[CP] commit: oldCp._cache @ 0x%x -> 0%n",
+                    oldCacheFieldAddr);
+        }
+
+        long prevOff = VMStructsHelper.findOffsetOrDefault(
+                "InstanceKlass::_previous_versions", 376L);
+        long prev = UnsafeUtils.unsafe.getLong(getAddress() + prevOff);
+        int pvRewritten = 0;
+        while (prev != 0) {
+            long pvCp = UnsafeUtils.unsafe.getLong(prev + 0L);
+            if (pvCp == oldCpAddr) {
+                UnsafeUtils.unsafe.putLong(prev + 0L, expandedCpAddr);
+                pvRewritten++;
+            }
+            prev = UnsafeUtils.unsafe.getLong(prev + 24L);
+        }
+        if (pvRewritten > 0) {
+            System.out.printf("[CP] commit: rewrote %d PreviousVersionNode._constants%n",
+                    pvRewritten);
+        }
+
         readFields();
     }
 
@@ -760,12 +863,35 @@ public class InstanceKlass extends Klass {
     }
 
     private int findExistingNat(int nameIdx, int descIdx) {
-        return findTwoShortRef(TAG_NAMEANDTYPE, nameIdx, descIdx);
+        long tagsData = expandedTagsAddr + TAGS_HEADER;
+        for (int i = 1; i < expandedLength; i++) {
+            int tag = UnsafeUtils.unsafe.getByte(tagsData + i) & 0xFF;
+            if (tag == TAG_NAMEANDTYPE) {
+                long base = expandedCpAddr + HEADER_SIZE + i * 8L;
+                int nameOfEntry = UnsafeUtils.unsafe.getShort(base)     & 0xFFFF;
+                int descOfEntry = UnsafeUtils.unsafe.getShort(base + 2) & 0xFFFF;
+                if (nameOfEntry == nameIdx && descOfEntry == descIdx) return i;
+            }
+            if (tag == 5 || tag == 6) i++;
+        }
+        return -1;
     }
 
-    private int findExistingRef(int tag, int classIdx, int natIdx) {
-        return findTwoShortRef(tag, classIdx, natIdx);
+    private int findExistingRef(int wantTag, int classIdx, int natIdx) {
+        long tagsData = expandedTagsAddr + TAGS_HEADER;
+        for (int i = 1; i < expandedLength; i++) {
+            int tag = UnsafeUtils.unsafe.getByte(tagsData + i) & 0xFF;
+            if (tag == wantTag) {
+                long base = expandedCpAddr + HEADER_SIZE + i * 8L;
+                int classOfEntry = UnsafeUtils.unsafe.getShort(base)     & 0xFFFF;
+                int natOfEntry   = UnsafeUtils.unsafe.getShort(base + 2) & 0xFFFF;
+                if (classOfEntry == classIdx && natOfEntry == natIdx) return i;
+            }
+            if (tag == 5 || tag == 6) i++;
+        }
+        return -1;
     }
+
     private void doFirstExpand(int extraSlots) {
         ConstantPool oldCp = new ConstantPool(constants);
         long oldCpAddr = oldCp.getAddress();
@@ -810,7 +936,6 @@ public class InstanceKlass extends Klass {
         UnsafeUtils.unsafe.putInt(newCpAddr + CP_OFF_LENGTH, newLength);
         UnsafeUtils.unsafe.putLong(newCpAddr + CP_OFF_TAGS, newTagsAddr);
 
-
         this.expandedCpAddr   = newCpAddr;
         this.expandedTagsAddr = newTagsAddr;
         this.expandedLength   = oldLength;
@@ -820,24 +945,6 @@ public class InstanceKlass extends Klass {
                 "[CP] doFirstExpand: full-copy 0x%x -> 0x%x header=%d len %d -> %d vtable=0x%x tags=0x%x%n",
                 oldCpAddr, newCpAddr, copyHeader, oldLength, newLength, cpVtable, newTagsAddr);
         readFields();
-    }
-    private int findTwoShortRef(int wantTag, int a, int b) {
-        long tagsData = expandedTagsAddr + TAGS_HEADER;
-        for (int i = 1; i < expandedLength; i++) {
-            int tag = UnsafeUtils.unsafe.getByte(tagsData + i) & 0xFF;
-            if (tag == wantTag) {
-                long base = expandedCpAddr + HEADER_SIZE + i * 8L;
-                int v1 = UnsafeUtils.unsafe.getShort(base) & 0xFFFF;
-                if (b < 0) {
-                    if (v1 == a) return i;
-                } else {
-                    int v2 = UnsafeUtils.unsafe.getShort(base + 2) & 0xFFFF;
-                    if (v1 == a && v2 == b) return i;
-                }
-            }
-            if (tag == 5 || tag == 6) i++;
-        }
-        return -1;
     }
 
     private long resolveSymbol(String s, Class<?>... donors) {
@@ -898,7 +1005,7 @@ public class InstanceKlass extends Klass {
         }
         return null;
     }
-    
+
     public void ensureCpCacheCapacity(int extraEntries) {
         ConstantPool cp = new ConstantPool(currentCpAddress());
         ConstantPoolCache cpc = cp.getCache();
@@ -923,11 +1030,8 @@ public class InstanceKlass extends Klass {
             UnsafeUtils.unsafe.putByte(newAddr + i,
                     UnsafeUtils.unsafe.getByte(oldAddr + i));
         }
-        long cpcVtable = UnsafeUtils.unsafe.getAddress(oldAddr);
-        UnsafeUtils.unsafe.putAddress(newAddr, cpcVtable);
 
-        UnsafeUtils.unsafe.putInt(newAddr + 0L, newLen);
-        UnsafeUtils.unsafe.putAddress(newAddr, cpcVtable);
+        UnsafeUtils.unsafe.putInt(newAddr + ConstantPoolCache.LENGTH_OFFSET, newLen);
 
         long oldEntriesBytes = (long) oldLen * ConstantPoolCache.ENTRY_SIZE;
         for (long i = 0; i < oldEntriesBytes; i++) {
@@ -935,52 +1039,88 @@ public class InstanceKlass extends Klass {
                     newAddr + headerSize + i,
                     UnsafeUtils.unsafe.getByte(oldAddr + headerSize + i));
         }
+
+        for (int i = oldLen; i < newLen; i++) {
+            long entryAddr = newAddr + headerSize + (long) i * ConstantPoolCache.ENTRY_SIZE;
+            for (int k = 0; k < ConstantPoolCache.ENTRY_SIZE; k++) {
+                UnsafeUtils.unsafe.putByte(entryAddr + k, (byte) 0);
+            }
+            UnsafeUtils.unsafe.putInt(
+                    entryAddr + ConstantPoolCache.ENTRY_INDICES_OFFSET,
+                    i);
+        }
+
+        System.out.printf("[CP] ensureCpc: initialized entries [%d, %d) with _indices = i%n",
+                oldLen, newLen);
+
+        long oldResolvedRefs = UnsafeUtils.unsafe.getLong(
+                oldAddr + ConstantPoolCache.RESOLVED_REFERENCES_OFFSET);
+        long oldRefMap = UnsafeUtils.unsafe.getLong(
+                oldAddr + ConstantPoolCache.REFERENCE_MAP_OFFSET);
+
         Object[] newResolvedArr = new Object[newLen];
         PINNED.add(newResolvedArr);
-        long newResolvedOop = OopDesc.addressOf(newResolvedArr);
+        long newResolvedArrOop = OopDesc.addressOf(newResolvedArr);
 
-        long oldResolvedOop = UnsafeUtils.unsafe.getLong(oldAddr + 16L);
-        if (oldResolvedOop != 0L) {
-            int oldArrLen = UnsafeUtils.unsafe.getInt(oldResolvedOop + OOP_ARRAY_LENGTH_OFFSET);
-            int copyLen = Math.min(oldArrLen, newLen);
-            long oldElems = oldResolvedOop + OOP_ARRAY_DATA_OFFSET;
-            long newElems = newResolvedOop + OOP_ARRAY_DATA_OFFSET;
-            for (int i = 0; i < copyLen; i++) {
-                int narrow = UnsafeUtils.unsafe.getInt(oldElems + (long) i * 4L);
-                UnsafeUtils.unsafe.putInt(newElems + (long) i * 4L, narrow);
+        int copiedRR = 0;
+        int oldArrLen = 0;
+        if (oldResolvedRefs != 0L) {
+            long oldArrOop = UnsafeUtils.unsafe.getLong(oldResolvedRefs);
+            if (oldArrOop != 0L) {
+                oldArrLen = UnsafeUtils.unsafe.getInt(oldArrOop + (int) OOP_ARRAY_LENGTH_OFFSET);
+                int copyLen = Math.min(oldArrLen, newLen);
+                for (int i = 0; i < copyLen; i++) {
+                    int narrow = UnsafeUtils.unsafe.getInt(
+                            oldArrOop + OOP_ARRAY_DATA_OFFSET + (long) i * 4L);
+                    UnsafeUtils.unsafe.putInt(
+                            newResolvedArrOop + OOP_ARRAY_DATA_OFFSET + (long) i * 4L, narrow);
+                }
+                copiedRR = copyLen;
             }
         }
-        UnsafeUtils.unsafe.putLong(newAddr + 16L, newResolvedOop);
 
-        short[] newRefMapArr = new short[newLen];
-        PINNED.add(newRefMapArr);
-        long newRefMapOop = OopDesc.addressOf(newRefMapArr);
+        long newOopSlotAddr = UnsafeUtils.unsafe.allocateMemory(8L);
+        UnsafeUtils.unsafe.putLong(newOopSlotAddr, newResolvedArrOop);
 
-        long oldRefMapOop = UnsafeUtils.unsafe.getLong(oldAddr + 24L);
-        if (oldRefMapOop != 0L) {
-            int oldMapLen = UnsafeUtils.unsafe.getInt(oldRefMapOop + OOP_ARRAY_LENGTH_OFFSET);
-            int copyLen = Math.min(oldMapLen, newLen);
-            long oldElems = oldRefMapOop + OOP_ARRAY_DATA_OFFSET;
-            long newElems = newRefMapOop + OOP_ARRAY_DATA_OFFSET;
-            for (int i = 0; i < copyLen; i++) {
-                short v = UnsafeUtils.unsafe.getShort(oldElems + (long) i * 2L);
-                UnsafeUtils.unsafe.putShort(newElems + (long) i * 2L, v);
-            }
+        long newRefMapSize = 8L + (long) newLen * 2L;
+        long newRefMapAddr = UnsafeUtils.unsafe.allocateMemory(newRefMapSize);
+        for (long i = 0; i < newRefMapSize; i++) {
+            UnsafeUtils.unsafe.putByte(newRefMapAddr + i, (byte) 0);
         }
-        UnsafeUtils.unsafe.putLong(newAddr + 24L, newRefMapOop);
+        UnsafeUtils.unsafe.putInt(newRefMapAddr, newLen);
+
+        int copiedRM = 0;
+        int oldRefMapLen = 0;
+        if (oldRefMap != 0L) {
+            oldRefMapLen = UnsafeUtils.unsafe.getInt(oldRefMap);
+            int copyLen = Math.min(oldRefMapLen, newLen);
+            for (int i = 0; i < copyLen; i++) {
+                short v = UnsafeUtils.unsafe.getShort(oldRefMap + 8L + (long) i * 2L);
+                UnsafeUtils.unsafe.putShort(newRefMapAddr + 8L + (long) i * 2L, v);
+            }
+            copiedRM = copyLen;
+        }
+
+        UnsafeUtils.unsafe.putLong(
+                newAddr + ConstantPoolCache.RESOLVED_REFERENCES_OFFSET, newOopSlotAddr);
+        UnsafeUtils.unsafe.putLong(
+                newAddr + ConstantPoolCache.REFERENCE_MAP_OFFSET, newRefMapAddr);
 
         long cpAddr = currentCpAddress();
-        UnsafeUtils.unsafe.putLong(cpAddr + 16L, newAddr);
-        UnsafeUtils.unsafe.putLong(newAddr + 8L, cpAddr);
-
-        UnsafeUtils.unsafe.putAddress(newAddr, cpcVtable);
+        UnsafeUtils.unsafe.putLong(cpAddr + ConstantPool.CACHE_OFFSET, newAddr);
+        UnsafeUtils.unsafe.putLong(newAddr + ConstantPoolCache.CONSTANT_POOL_OFFSET, cpAddr);
 
         System.out.printf(
-                "[CP] ensureCpc: full-copy 0x%x -> 0x%x %d -> %d vtable=0x%x resolved=0x%x refMap=0x%x%n",
-                oldAddr, newAddr, oldLen, newLen, cpcVtable, newResolvedOop, newRefMapOop);
+                "[CP] ensureCpc: full-copy 0x%x -> 0x%x %d -> %d%n",
+                oldAddr, newAddr, oldLen, newLen);
+        System.out.printf(
+                "[CP] ensureCpc: _resolved_references: oldLen=%d newLen=%d copied=%d (oop=%d, oopSlot=%d)%n",
+                oldArrLen, newLen, copiedRR, newResolvedArrOop, newOopSlotAddr);
+        System.out.printf(
+                "[CP] ensureCpc: _reference_map:       oldLen=%d newLen=%d copied=%d (addr=%d)%n",
+                oldRefMapLen, newLen, copiedRM, newRefMapAddr);
         readFields();
     }
-
     @Override
     public String toString() {
         return String.format(

@@ -7,8 +7,8 @@ import static net.hotspot.cplus.VMStructsHelper.findOffsetOrDefault;
 
 public class ConstantPool extends Metadata {
 
-    private static final long TAGS_OFFSET                    = findOffsetOrDefault("ConstantPool::_tags",                    8L);
-    private static final long CACHE_OFFSET                   = findOffsetOrDefault("ConstantPool::_cache",                   16L);
+    public  static final long TAGS_OFFSET                    = findOffsetOrDefault("ConstantPool::_tags",                    8L);
+    public  static final long CACHE_OFFSET                   = findOffsetOrDefault("ConstantPool::_cache",                   16L);
     private static final long POOL_HOLDER_OFFSET             = findOffsetOrDefault("ConstantPool::_pool_holder",             24L);
     private static final long OPERANDS_OFFSET                = findOffsetOrDefault("ConstantPool::_operands",                32L);
     private static final long RESOLVED_KLASSES_OFFSET        = findOffsetOrDefault("ConstantPool::_resolved_klasses",        40L);
@@ -17,7 +17,7 @@ public class ConstantPool extends Metadata {
     private static final long GENERIC_SIGNATURE_INDEX_OFFSET = findOffsetOrDefault("ConstantPool::_generic_signature_index", 52L);
     private static final long SOURCE_FILE_NAME_INDEX_OFFSET  = findOffsetOrDefault("ConstantPool::_source_file_name_index",  54L);
     private static final long FLAGS_OFFSET                   = findOffsetOrDefault("ConstantPool::_flags",                   56L);
-    private static final long LENGTH_OFFSET                  = findOffsetOrDefault("ConstantPool::_length",                  60L);
+    public  static final long LENGTH_OFFSET                  = findOffsetOrDefault("ConstantPool::_length",                  60L);
     private static final long SAVED_OFFSET                   = findOffsetOrDefault("ConstantPool::_saved",                   64L);
 
     private static final long BASE_OFFSET                    = 72L;

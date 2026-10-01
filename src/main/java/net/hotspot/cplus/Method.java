@@ -112,7 +112,9 @@ public class Method extends Metadata {
 
         readFields();
     }
-
+    public static long accessFlagsFieldOffset()  { return ACCESS_FLAGS_OFFSET; }
+    public static long intrinsicIdFieldOffset()  { return INTRINSIC_ID_OFFSET; }
+    public static long flagsFieldOffset()        { return FLAGS_OFFSET; }
     public NMethod code() {
         if (code == 0) return null;
         return new NMethod(code);
