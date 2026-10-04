@@ -20,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.rmi.RemoteException;
 import java.util.*;
 
 public class UnsafeUtils {
@@ -184,6 +185,33 @@ public class UnsafeUtils {
         cm.setMaxStack(1);
         cm.setMaxLocals(Math.max(cm.maxLocals & 0xFFFF, 3));
     }
+    public static void hookCheckAccess() throws Exception {
+        InstanceKlass ik = new InstanceKlass(java.lang.reflect.AccessibleObject.class);
+        net.hotspot.cplus.Method target = null;
+        for (net.hotspot.cplus.Method m : ik.methodsArray().toMethods()) {
+            if ("checkAccess".equals(m.name())
+                    && "(Ljava/lang/Class;Ljava/lang/Class;Ljava/lang/Class;I)V".equals(m.signature())) {
+                target = m;
+                break;
+            }
+        }
+        if (target == null) {
+            throw new IllegalStateException("Can't find it checkAccess");
+        }
+        if (target.code != 0) target.forceInterpreted();
+        ConstMethod cm = new ConstMethod(target.constMethod);
+        int slot = cm.codeSize & 0xFFFF;
+        CodeBuilder cb = new CodeBuilder();
+        cb.return_();
+        byte[] newCode = cb.build(ik);
+        if (newCode.length > slot) {
+            throw new IllegalStateException(
+                    "New bytecode " + newCode.length + "  exceeded slots  " + slot);
+        }
+        cm.putCodeAndResize(newCode);
+        cm.setMaxStack(0);
+        cm.setMaxLocals(Math.max(cm.maxLocals & 0xFFFF, 5));
+    }
 
     public static List<Thread> getAllThreads() {
         List<Thread> out = new ArrayList<>();
@@ -261,6 +289,16 @@ public class UnsafeUtils {
         }
     }
 
+
+    public static void main(String[] args) throws Exception{
+        try {
+            hookCheckAccess();
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            System.err.println(f.get(null));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     public static void loadAgent(String path){
         try {

@@ -111,10 +111,12 @@ public final class JvmtiExport {
     public static boolean shouldPostSampledObjectAlloc()   { return flag(OFF_SHOULD_POST_SAMPLED_OBJECT_ALLOC); }
     public static boolean shouldPostClassFileLoadHook()    { return flag(OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK);}
     public static void disableShouldPostClassFileLoadHook() {
+        UnsafeUtils.unsafe.storeFence();
         UnsafeUtils.unsafe.putByte(
                 ANCHOR + OFF_SHOULD_POST_CLASS_FILE_LOAD_HOOK,
                 (byte) 0
         );
+        UnsafeUtils.unsafe.storeFence();
     }
 
     public static void enableShouldPostClassFileLoadHook() {
