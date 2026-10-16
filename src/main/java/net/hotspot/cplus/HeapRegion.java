@@ -39,6 +39,11 @@ public class HeapRegion {
         return new HeapRegionType(address + TYPE_OFF);
     }
 
+
+
+    public boolean contains(long addr) {
+        return addr >= bottom && addr < end;
+    }
     @Override
     public String toString() {
         return String.format(

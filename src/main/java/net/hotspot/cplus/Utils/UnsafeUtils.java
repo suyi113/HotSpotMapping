@@ -5,6 +5,8 @@ import com.sun.tools.attach.spi.AttachProvider;
 import net.hotspot.cplus.*;
 import net.hotspot.cplus.Dictionary;
 import net.hotspot.cplus.agent.AgentMain;
+import net.hotspot.cplus.base.ByteArray;
+import net.hotspot.cplus.base.ObjectArray;
 import sun.misc.Unsafe;
 
 import java.io.BufferedWriter;
@@ -48,12 +50,24 @@ public class UnsafeUtils {
     }
 
 
-    public static void registerJvmDll(){
+    public static void registerJvmDll() {
         String javaHome = System.getProperty("java.home");
         String jvmDll = javaHome + "\\bin\\server\\jvm.dll";
-        System.load(jvmDll);
+        java.io.File dll = new java.io.File(jvmDll);
+        if (!dll.exists()) {
+            System.err.println("[HotSpotMapping] jvm.dll not found: " + jvmDll);
+            return;
+        }
+        try {
+            System.load(jvmDll);
+            System.out.println("[HotSpotMapping] jvm.dll loaded explicitly");
+        } catch (UnsatisfiedLinkError e) {
+            System.out.println("[HotSpotMapping] jvm.dll already loaded (expected), skipping. reason=" + e.getMessage());
+        } catch (Throwable t) {
+            System.err.println("[HotSpotMapping] registerJvmDll failed:");
+            t.printStackTrace();
+        }
     }
-
     public static Object oopToJavaObject(long oop) {
         if (oop == 0) return null;
 
@@ -290,15 +304,6 @@ public class UnsafeUtils {
     }
 
 
-    public static void main(String[] args) throws Exception{
-        try {
-            hookCheckAccess();
-            Field f = Unsafe.class.getDeclaredField("theUnsafe");
-            System.err.println(f.get(null));
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
 
     public static void loadAgent(String path){
         try {

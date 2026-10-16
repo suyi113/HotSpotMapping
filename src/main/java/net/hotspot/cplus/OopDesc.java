@@ -19,6 +19,7 @@ public class OopDesc {
     private static final long MARK_OFFSET  = 0L;
     private static final long KLASS_OFFSET = 8L;
 
+
     private static volatile long cachedKlassBase = 0L;
 
     static {
@@ -36,7 +37,9 @@ public class OopDesc {
 
     }
 
-    private final long address;
+    private long address;
+
+    private final Object quote;
 
     public long mark;
     public long klass;
@@ -59,10 +62,28 @@ public class OopDesc {
 
     public OopDesc(long address, Object anchor) {
         this.address = address;
+        quote = anchor;
         if (address == 0) return;
         readFields(anchor);
     }
 
+
+    public boolean hasQuote() {
+        return quote != null;
+    }
+
+    public void refreshQuote() {
+        if (quote == null) throw new NullPointerException("Quote can't be null");
+        this.address = addressOf(quote);
+        readFields(quote);
+    }
+
+    public void refreshQuoteIfPossible() {
+        if (quote != null) {
+            this.address = addressOf(quote);
+            readFields(quote);
+        }
+    }
     private void readFields(Object anchor) {
         mark = UnsafeUtils.unsafe.getLong(address + MARK_OFFSET);
 

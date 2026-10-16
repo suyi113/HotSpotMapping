@@ -529,7 +529,6 @@ public class InstanceKlass extends Klass {
         int nameIdx = addUtf8(name, donors);
         int descIdx = addUtf8(desc, donors);
         ensureCpCapacity(1);
-        // 不查 findExistingNat，直接新建
         int idx = expandedLength;
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_NAMEANDTYPE);
@@ -546,7 +545,6 @@ public class InstanceKlass extends Klass {
         int classIdx = addClass(owner, donors);
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
-        // 不查 findExistingRef，直接新建
         int idx = expandedLength;
         ensureCpCacheHasIndex(idx);
         initCacheEntryIndices(idx, idx);

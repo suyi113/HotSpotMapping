@@ -15,7 +15,7 @@ public class HeapRegionType {
     private static final int STARTS_HUMONGOUS_TAG    = 12;
     private static final int CONTINUES_HUMONGOUS_TAG = 13;
     private static final int OLD_TAG                 = 16;
-
+    private static final int YOUNG_MASK              = 2;
     private static final int TAG_MASK     = 0x1F;
     private static final int PINNED_MASK  = 0x08;
     private static final int ARCHIVE_MASK = 0x20;
@@ -33,7 +33,7 @@ public class HeapRegionType {
     private int raw() { return tag & TAG_MASK; }
 
     public boolean isFree()               { return raw() == FREE_TAG; }
-    public boolean isYoung()              { return raw() == YOUNG_TAG || raw() == EDEN_TAG || raw() == SURV_TAG; }
+    public boolean isYoung()              { return (tag & YOUNG_MASK) != 0; }
     public boolean isEden()               { return raw() == EDEN_TAG; }
     public boolean isSurvivor()           { return raw() == SURV_TAG; }
     public boolean isHumongous()          { return raw() == STARTS_HUMONGOUS_TAG || raw() == CONTINUES_HUMONGOUS_TAG; }
