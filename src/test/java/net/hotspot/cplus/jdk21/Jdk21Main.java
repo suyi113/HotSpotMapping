@@ -1,0 +1,858 @@
+package net.hotspot.cplus.jdk21;
+
+import net.hotspot.cplus.jdk21.classloading.ClassLoaderData;
+import net.hotspot.cplus.jdk21.codecache.CodeBuilder;
+import net.hotspot.cplus.jdk21.codecache.NMethod;
+import net.hotspot.cplus.jdk21.core.OopDesc;
+import net.hotspot.cplus.jdk21.core.VMStructs;
+import net.hotspot.cplus.jdk21.core.VMStructsHelper;
+import net.hotspot.cplus.jdk21.gc.G1CollectedHeap;
+import net.hotspot.cplus.jdk21.gc.HeapRegion;
+import net.hotspot.cplus.jdk21.gc.HeapRegionType;
+import net.hotspot.cplus.jdk21.gc.HeapScanner;
+import net.hotspot.cplus.jdk21.klass.ConstMethod;
+import net.hotspot.cplus.jdk21.klass.ConstantPool;
+import net.hotspot.cplus.jdk21.klass.FieldInfo;
+import net.hotspot.cplus.jdk21.klass.InstanceKlass;
+import net.hotspot.cplus.jdk21.klass.Klass;
+import net.hotspot.cplus.jdk21.klass.Method;
+import net.hotspot.cplus.jdk21.klass.Symbol;
+import net.hotspot.cplus.jdk21.threads.JavaThread;
+import net.hotspot.cplus.jdk21.threads.ThreadsList;
+import net.hotspot.cplus.jdk21.threads.ThreadsSMRSupport;
+
+import com.sun.management.HotSpotDiagnosticMXBean;
+import net.hotspot.cplus.jdk21.core.UnsafeUtils;
+
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
+import java.lang.invoke.MethodType;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+public final class Jdk21Main {
+
+    private static int passed;
+    private static int failed;
+    private static final List<String> failures = new ArrayList<>();
+
+    public static void main(String[] args) {
+        setupConsole();
+
+        section("环境");
+        environment();
+
+        section("VMStructs");
+        vmStructs();
+
+        section("Klass 基本字段");
+        klassBasics();
+
+        section("Klass kind 分类");
+        klassKinds();
+
+        section("Symbol 名字解码");
+        symbolDecoding();
+
+        section("layout_helper 解析");
+        layoutHelper();
+
+        section("父类链");
+        superChain();
+
+        section("InstanceKlass / Method / ConstMethod");
+        instanceKlassChecks();
+
+        section("字段（fieldinfo stream）");
+        fieldChecks();
+
+        section("OopDesc");
+        oopChecks();
+
+        section("类加载（ClassLoaderData）");
+        classLoaderChecks();
+
+        section("堆扫描（G1）");
+        heapChecks();
+
+        section("Code cache（nmethod）");
+        codeCacheChecks();
+
+        section("线程（JavaThread / ThreadsList）");
+        threadChecks();
+
+        section("常量池扩展（CodeBuilder 前置）");
+        cpExpansionChecks();
+
+        section("字节码修改（真执行）");
+        bytecodePatchChecks();
+
+        section("异常路径");
+        errorPaths();
+
+        summary();
+    }
+
+    private static void environment() {
+        System.out.println("  java.version = " + System.getProperty("java.version"));
+        System.out.println("  java.vm.name = " + System.getProperty("java.vm.name"));
+        System.out.println("  java.vm.info = " + System.getProperty("java.vm.info"));
+        System.out.println("  file.encoding = " + System.getProperty("file.encoding")
+                + ", native.encoding = " + System.getProperty("native.encoding")
+                + ", stdout.encoding = " + System.getProperty("stdout.encoding"));
+        System.out.println("  实际输出编码 = " + System.getProperty("jdk21.console.charset"));
+
+        HotSpotDiagnosticMXBean bean = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+        System.out.println("  UseCompressedOops          = " + vmOption(bean, "UseCompressedOops"));
+        System.out.println("  UseCompressedClassPointers = " + vmOption(bean, "UseCompressedClassPointers"));
+        System.out.println("  Unsafe                     = " + (UnsafeUtils.unsafe != null));
+
+        check("JDK 版本为 21.x", System.getProperty("java.version").startsWith("21"),
+                System.getProperty("java.version"));
+        check("Unsafe 可用", UnsafeUtils.unsafe != null);
+    }
+
+    private static void vmStructs() {
+        int fields;
+        int types;
+        try {
+            fields = VMStructsHelper.fieldCount();
+            types = VMStructsHelper.typeCount();
+        } catch (Throwable t) {
+            check("VMStructs 可用", false, t.toString());
+            return;
+        }
+
+        check("VMStructs 可用", fields > 0 && types > 0, "fields=" + fields + ", types=" + types);
+
+        System.out.println("  Klass 类型大小 = " + VMStructsHelper.findSize("Klass") + " 字节");
+        for (String name : new String[]{
+                "Klass::_layout_helper", "Klass::_name", "Klass::_super",
+                "Klass::_java_mirror", "Klass::_vtable_len", "Klass::_access_flags"}) {
+            Long off = offsetOrNull(name);
+            System.out.println("  " + name + " -> " + (off == null ? "未导出" : off));
+        }
+    }
+
+    private static void klassBasics() {
+        Klass string = new Klass(String.class);
+        check("String: 地址非 0", string.getAddress() != 0);
+        check("String: name 字段非 0", string.name() != 0);
+        check("String: javaMirror 非 0", string.javaMirror() != 0);
+        check("String: classLoaderData 非 0", string.classLoaderData() != 0);
+        check("String: vtableLen > 0", string.vtableLength() > 0, "vtableLen=" + string.vtableLength());
+        check("String: accessFlags 非 0", string.accessFlags() != 0,
+                String.format("0x%x", string.accessFlags()));
+        check("toString 形如 Klass[...]", string.toString().startsWith("Klass["));
+        check("isKlass()", string.isKlass());
+
+        Klass again = new Klass(string.getAddress());
+        check("按地址重建后 name 一致", again.name() == string.name());
+        check("按地址重建后 kind 一致", again.kind() == string.kind());
+    }
+
+    private static void klassKinds() {
+
+        checkKlass(String.class, "java/lang/String", Klass.INSTANCE_KLASS_KIND, "java/lang/Object");
+        checkKlass(Object.class, "java/lang/Object", Klass.INSTANCE_KLASS_KIND, null);
+        checkKlass(Runnable.class, "java/lang/Runnable", Klass.INSTANCE_KLASS_KIND, "java/lang/Object");
+        checkKlass(Thread.class, "java/lang/Thread", Klass.INSTANCE_KLASS_KIND, "java/lang/Object");
+        checkKlass(Class.class, "java/lang/Class", Klass.INSTANCE_MIRROR_KLASS_KIND, "java/lang/Object");
+        checkKlass(int[].class, "[I", Klass.TYPE_ARRAY_KLASS_KIND, "java/lang/Object");
+        checkKlass(long[].class, "[J", Klass.TYPE_ARRAY_KLASS_KIND, "java/lang/Object");
+        checkKlass(String[].class, "[Ljava/lang/String;", Klass.OBJ_ARRAY_KLASS_KIND, "[Ljava/lang/Object;");
+
+        Klass self = new Klass(Jdk21Main.class);
+        check("Jdk21Main: kind=InstanceKlass", self.kind() == Klass.INSTANCE_KLASS_KIND, self.kindName());
+        check("Jdk21Main: name", "net/hotspot/cplus/jdk21/Jdk21Main".equals(self.getName()), self.getName());
+        check("Jdk21Main: 非共享类", !self.isShared() || self.sharedClassPathIndex() >= 0,
+                "shared=" + self.isShared() + ", pathIndex=" + self.sharedClassPathIndex());
+        System.out.println("  " + self);
+    }
+
+    private static void checkKlass(Class<?> clazz, String expectedName, int expectedKind, String expectedSuper) {
+        String label = clazz.getSimpleName().isEmpty() ? clazz.getName() : clazz.getSimpleName();
+        Klass k = new Klass(clazz);
+
+        check(label + ": kind=" + expectedKind, k.kind() == expectedKind, k.kindName());
+        check(label + ": name=" + expectedName, expectedName.equals(k.getName()), k.getName());
+        check(label + ": 地址=0x" + Long.toHexString(k.getAddress()), k.getAddress() != 0);
+
+        boolean instance = expectedKind <= Klass.INSTANCE_STACK_CHUNK_KLASS_KIND;
+        check(label + ": layout_helper 与 kind 一致",
+                k.layoutHelperIsInstance() == instance,
+                "kind=" + k.kindName() + ", layoutHelper=" + k.layoutHelper());
+
+        if (expectedSuper == null) {
+            check(label + ": 无父类", k.superKlass() == 0, String.valueOf(k.superKlass()));
+        } else {
+            check(label + ": 父类=" + expectedSuper, expectedSuper.equals(superName(k)), superName(k));
+        }
+
+        check(label + ": vtableLen > 0", k.vtableLength() > 0, "vtableLen=" + k.vtableLength());
+    }
+
+    private static String superName(Klass k) {
+        long sup = k.superKlass();
+        return sup == 0 ? null : new Klass(sup).getName();
+    }
+
+    private static void symbolDecoding() {
+        Klass string = new Klass(String.class);
+        Symbol symbol = new Symbol(string.name());
+
+        check("Symbol.value", "java/lang/String".equals(symbol.value), String.valueOf(symbol.value));
+        check("Symbol.refcount > 0", symbol.refcount() > 0, "refcount=" + symbol.refcount());
+        check("Symbol.utf8Length = 16", symbol.utf8Length() == 16, "length=" + symbol.utf8Length());
+        check("Symbol.toString 含 value", symbol.toString().contains("java/lang/String"));
+
+        check("Klass.getExternalName", "java.lang.String".equals(string.getExternalName()),
+                string.getExternalName());
+    }
+
+    private static void layoutHelper() {
+        Klass intArray = new Klass(int[].class);
+        check("int[]: isTypeArray", intArray.layoutHelperIsTypeArray());
+        check("int[]: !isObjArray", !intArray.layoutHelperIsObjArray());
+        check("int[]: headerSize=16", intArray.layoutHelperHeaderSize() == 16,
+                "headerSize=" + intArray.layoutHelperHeaderSize());
+        check("int[]: elementType=T_INT(10)", intArray.layoutHelperElementType() == 10,
+                "elementType=" + intArray.layoutHelperElementType());
+        check("int[]: log2ElementSize=2", intArray.layoutHelperLog2ElementSize() == 2,
+                "log2=" + intArray.layoutHelperLog2ElementSize());
+
+        Klass longArray = new Klass(long[].class);
+        check("long[]: elementType=T_LONG(11)", longArray.layoutHelperElementType() == 11,
+                "elementType=" + longArray.layoutHelperElementType());
+        check("long[]: log2ElementSize=3", longArray.layoutHelperLog2ElementSize() == 3,
+                "log2=" + longArray.layoutHelperLog2ElementSize());
+
+        Klass byteArray = new Klass(byte[].class);
+        check("byte[]: elementType=T_BYTE(8)", byteArray.layoutHelperElementType() == 8,
+                "elementType=" + byteArray.layoutHelperElementType());
+        check("byte[]: log2ElementSize=0", byteArray.layoutHelperLog2ElementSize() == 0,
+                "log2=" + byteArray.layoutHelperLog2ElementSize());
+
+        Klass objArray = new Klass(String[].class);
+        check("String[]: isObjArray", objArray.layoutHelperIsObjArray());
+        check("String[]: elementType=T_OBJECT(12)", objArray.layoutHelperElementType() == 12,
+                "elementType=" + objArray.layoutHelperElementType());
+
+        int expectedOopLog2 = Boolean.parseBoolean(vmOption(
+                ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class), "UseCompressedOops"))
+                ? 2 : 3;
+        check("String[]: log2ElementSize=" + expectedOopLog2,
+                objArray.layoutHelperLog2ElementSize() == expectedOopLog2,
+                "log2=" + objArray.layoutHelperLog2ElementSize());
+
+        Klass string = new Klass(String.class);
+        check("String: 实例 layout_helper > 0", string.layoutHelperIsInstance());
+        check("String: layoutHelperSizeInBytes == layoutHelper（无 slow path）",
+                string.layoutHelperNeedsSlowPath()
+                        || string.layoutHelperSizeInBytes() == string.layoutHelper(),
+                "layoutHelper=" + string.layoutHelper()
+                        + ", sizeInBytes=" + string.layoutHelperSizeInBytes());
+
+        check("instanceLayoutHelper(24,false) = 0xc0",
+                Klass.instanceLayoutHelper(24, false) == 0xc0,
+                Integer.toHexString(Klass.instanceLayoutHelper(24, false)));
+    }
+
+    private static void superChain() {
+        List<String> chain = new ArrayList<>();
+        Klass k = new Klass(Jdk21Main.class);
+        while (k != null && chain.size() < 64) {
+            String name = k.getName();
+            chain.add(name);
+            long sup = k.superKlass();
+            k = sup == 0 ? null : new Klass(sup);
+        }
+
+        check("父类链以 java/lang/Object 结束",
+                !chain.isEmpty() && "java/lang/Object".equals(chain.get(chain.size() - 1)),
+                String.join(" -> ", chain));
+        check("父类链无环", chain.size() < 64, "depth=" + chain.size());
+
+        Klass string = new Klass(String.class);
+        int depth = string.superDepth();
+        check("String: superDepth=1", depth == 1, "depth=" + depth);
+        check("String: primary_supers[depth] == String",
+                depth < Klass.PRIMARY_SUPER_LIMIT
+                        && new Klass(string.primarySuperOfDepth(depth)).getName().equals("java/lang/String"),
+                "depth=" + depth);
+        check("String: canBePrimarySuper", string.canBePrimarySuper());
+    }
+
+    private static void instanceKlassChecks() {
+        InstanceKlass ik = new InstanceKlass(String.class);
+        check("String: InstanceKlass 构造", ik.getAddress() != 0);
+        check("String: 名字", "java/lang/String".equals(ik.getName()), ik.getName());
+        check("String: initState=fully_initialized",
+                ik.initState() == InstanceKlass.INIT_STATE_FULLY_INITIALIZED, "state=" + ik.initState());
+        check("String: constants 非 0", ik.constants() != 0);
+        check("String: thisClassIndex > 0", (ik.thisClassIndex() & 0xFFFF) > 0,
+                "index=" + (ik.thisClassIndex() & 0xFFFF));
+        check("String: fieldinfoStream 非 0", ik.fieldinfoStream() != 0);
+        check("String: 未被重定义", !ik.hasBeenRedefined());
+
+        Set<String> expected = reflectionSignatures(String.class);
+        Set<String> actual = new HashSet<>();
+        for (Method m : ik.getMethods()) {
+            String name = m.name();
+            String sig = m.signature();
+            if (name != null && sig != null) {
+                actual.add(name + sig);
+            }
+        }
+        check("String: 反射的每个方法/构造器都能找到", actual.containsAll(expected),
+                "反射=" + expected.size() + ", 内存=" + actual.size());
+        check("String: 多出的只有 <clinit>", actual.size() - expected.size() <= 1,
+                "差 " + (actual.size() - expected.size()));
+
+        Method length = ik.findMethod("length", "()I");
+        check("String.length() 找到", length != null);
+        if (length != null) {
+            ConstMethod cm = new ConstMethod(length.constMethod);
+            check("String.length: 常量池非 0", cm.constants != 0);
+            check("String.length: codeSize > 0", (cm.codeSize & 0xFFFF) > 0,
+                    "codeSize=" + (cm.codeSize & 0xFFFF));
+            check("String.length: 容量足够",
+                    cm.constMethodSizeInBytes() >= ConstMethod.CONST_METHOD_HEADER_SIZE + (cm.codeSize & 0xFFFF),
+                    "size=" + cm.constMethodSizeInBytes() + "B");
+            check("String.length: 非 native/abstract", !length.isNative() && !length.isAbstract());
+        }
+
+        Method charAt = ik.findMethod("charAt", "(I)C");
+        check("String.charAt(I)C 找到", charAt != null);
+
+        InstanceKlass self = new InstanceKlass(Jdk21Main.class);
+        Method main = self.findMethod("main", "([Ljava/lang/String;)V");
+        check("Jdk21Main.main 找到", main != null);
+        if (main != null) {
+            ConstMethod cm = new ConstMethod(main.constMethod);
+            byte[] code = cm.code();
+            check("Jdk21Main.main 字节码非空", code.length > 0, "length=" + code.length);
+            check("Jdk21Main.main 首字节是合法 opcode", code.length > 0 && isKnownOpcode(code[0]),
+                    code.length == 0 ? "空" : String.format("0x%02x", code[0] & 0xFF));
+        }
+
+        System.out.println("  " + ik);
+    }
+
+    private static boolean isKnownOpcode(byte b) {
+        int op = b & 0xFF;
+        return op >= 0x00 && op <= 0xC9;
+    }
+
+    private static Set<String> reflectionSignatures(Class<?> clazz) {
+        Set<String> out = new HashSet<>();
+        for (java.lang.reflect.Method m : clazz.getDeclaredMethods()) {
+            out.add(m.getName() + MethodType.methodType(m.getReturnType(), m.getParameterTypes())
+                    .toMethodDescriptorString());
+        }
+        for (java.lang.reflect.Constructor<?> c : clazz.getDeclaredConstructors()) {
+            out.add("<init>" + MethodType.methodType(void.class, c.getParameterTypes())
+                    .toMethodDescriptorString());
+        }
+        return out;
+    }
+
+    private static void fieldChecks() {
+        InstanceKlass ik = new InstanceKlass(Sample.class);
+        check("Sample: 字段数 = 5", ik.fieldCount() == 5, "count=" + ik.fieldCount());
+        check("Sample: 无注入字段", ik.numInjectedFields() == 0, "injected=" + ik.numInjectedFields());
+
+        ConstantPool cp = ik.getConstantPool();
+        Set<String> expected = new HashSet<>();
+        for (java.lang.reflect.Field f : Sample.class.getDeclaredFields()) {
+            expected.add(f.getName() + ":" + typeDescriptor(f.getType())
+                    + ":" + java.lang.reflect.Modifier.isStatic(f.getModifiers()));
+        }
+        Set<String> actual = new HashSet<>();
+        for (FieldInfo fi : ik.getFields()) {
+            String n = fi.name(cp);
+            String s = fi.signature(cp);
+            if (n != null && s != null) {
+                actual.add(n + ":" + s + ":" + fi.isStatic());
+            }
+        }
+        check("Sample: 字段名/描述符/静态标记与反射一致", actual.equals(expected),
+                "内存=" + actual + ", 反射=" + expected);
+
+        FieldInfo intField = ik.findField("intField", "I");
+        check("Sample.intField 找到", intField != null);
+        if (intField != null) {
+            check("Sample.intField 偏移已布局", intField.isOffsetSet(), "offset=" + intField.offset);
+            check("Sample.intField 非静态", !intField.isStatic());
+            check("Sample.intField 非 final", !intField.isFinal());
+        }
+        FieldInfo staticInt = ik.findField("staticInt", "I");
+        check("Sample.staticInt 找到且是静态", staticInt != null && staticInt.isStatic());
+
+        FieldInfo stringField = ik.findField("stringField", "Ljava/lang/String;");
+        check("Sample.stringField 描述符正确", stringField != null);
+
+        InstanceKlass cls = new InstanceKlass(Class.class);
+        check("java.lang.Class: 有 JVM 注入字段", cls.numInjectedFields() > 0,
+                "java=" + cls.numJavaFields() + ", injected=" + cls.numInjectedFields());
+
+        System.out.println("  Sample fields = " + actual);
+        System.out.println("  java.lang.Class: fields=" + cls.fieldCount()
+                + " (java=" + cls.numJavaFields() + ", injected=" + cls.numInjectedFields() + ")");
+    }
+
+    private static String typeDescriptor(Class<?> type) {
+
+        return MethodType.methodType(type).toMethodDescriptorString().substring(2);
+    }
+
+    private static class Sample {
+        int intField;
+        long longField;
+        String stringField;
+        static int staticInt;
+        static String staticString;
+    }
+
+    private static void oopChecks() {
+        Klass selfKlass = new Klass(Jdk21Main.class);
+        long handle = selfKlass.javaMirror();
+        check("Jdk21Main: javaMirror 句柄非 0", handle != 0);
+        if (handle == 0) return;
+
+        long mirrorOop = UnsafeUtils.unsafe.getLong(handle);
+        check("Jdk21Main: 镜像 oop 非 0", mirrorOop != 0, "0x" + Long.toHexString(mirrorOop));
+        if (mirrorOop == 0) return;
+
+        OopDesc oop = OopDesc.of(mirrorOop);
+        check("OopDesc: mark 非 0", oop.mark != 0, String.format("0x%x", oop.mark));
+        check("OopDesc: 未锁定（mark 低位 = 01）", oop.isUnlocked(), String.format("mark=0x%x", oop.mark));
+        check("OopDesc: klass 指向 java.lang.Class 的 Klass",
+                oop.klass == new Klass(Class.class).getAddress(),
+                String.format("0x%x vs 0x%x", oop.klass, new Klass(Class.class).getAddress()));
+        check("OopDesc.getInstanceKlass 名字", "java/lang/Class".equals(oop.getInstanceKlass().getName()),
+                oop.getInstanceKlass().getName());
+        check("OopDesc.fieldBase = address + 12（压缩类指针）",
+                oop.fieldBase() == oop.getAddress() + 12, "fieldBase=" + oop.fieldBase());
+
+        Object probe = new Object();
+        long probeAddr = OopDesc.addressOf(probe);
+        OopDesc probeOop = OopDesc.of(probeAddr);
+        check("addressOf/of 往返：klass 正确",
+                probeOop.klass == new Klass(probe.getClass()).getAddress(),
+                String.format("0x%x", probeOop.klass));
+
+        Object back = UnsafeUtils.oopToJavaObject(mirrorOop);
+        check("oopToJavaObject 还原成 Jdk21Main.class", back == Jdk21Main.class, String.valueOf(back));
+
+        System.out.println("  " + oop);
+    }
+
+    private static void classLoaderChecks() {
+        List<Class<?>> loaded = UnsafeUtils.getAllLoadedClass();
+        check("已加载类数量 > 100", loaded.size() > 100, "count=" + loaded.size());
+        check("包含 java.lang.String", loaded.contains(String.class));
+        check("包含 Jdk21Main", loaded.contains(Jdk21Main.class));
+
+        long head = VMStructsHelper.findStaticAddress("ClassLoaderDataGraph::_head");
+        check("ClassLoaderDataGraph::_head 可解析", head > 0);
+
+        List<ClassLoaderData> clds = new ArrayList<>();
+        long ptr = UnsafeUtils.unsafe.getLong(head);
+        Set<Long> seen = new HashSet<>();
+        while (ptr != 0 && seen.add(ptr) && clds.size() < 500) {
+            ClassLoaderData cld = new ClassLoaderData(ptr);
+            clds.add(cld);
+            ptr = cld.next;
+        }
+        check("ClassLoaderData 数量 > 0", clds.size() > 0, "count=" + clds.size());
+
+        int totalKlasses = 0;
+        ClassLoaderData bootstrap = null;
+        for (ClassLoaderData cld : clds) {
+            List<InstanceKlass> ks = cld.allKlasses();
+            totalKlasses += ks.size();
+            for (InstanceKlass k : ks) {
+                if ("java/lang/Object".equals(k.getName())) {
+                    bootstrap = cld;
+                }
+            }
+        }
+        check("遍历到的 Klass 总数 > 100", totalKlasses > 100, "count=" + totalKlasses);
+        check("找到包含 java/lang/Object 的 ClassLoaderData", bootstrap != null);
+        if (bootstrap != null) {
+            List<InstanceKlass> ks = bootstrap.allKlasses();
+            check("该 CLD 里有 java/lang/String",
+                    ks.stream().anyMatch(k -> "java/lang/String".equals(k.getName())),
+                    "klasses=" + ks.size());
+            System.out.println("  " + bootstrap);
+        }
+
+        ClassLoader appLoader = Jdk21Main.class.getClassLoader();
+        boolean foundApp = false;
+        for (ClassLoaderData cld : clds) {
+            if (cld.classLoaderJavaObject() == appLoader) {
+                foundApp = cld.allKlasses().stream()
+                        .anyMatch(k -> "net/hotspot/cplus/jdk21/Jdk21Main".equals(k.getName()));
+            }
+        }
+        check("应用类加载器的 CLD 里有 Jdk21Main", foundApp);
+
+        System.out.println("  ClassLoaderData=" + clds.size() + " 个, Klass 总数=" + totalKlasses);
+    }
+
+    private static void heapChecks() {
+        G1CollectedHeap g1 = G1CollectedHeap.current();
+        check("G1CollectedHeap 地址非 0", g1.getAddress() != 0);
+
+        List<HeapRegion> regions = g1.hrm().allRegions();
+        check("HeapRegion 数量 > 0", regions.size() > 0, "regions=" + regions.size());
+
+        int free = 0, young = 0, old = 0, humongous = 0, other = 0;
+        long used = 0;
+        for (HeapRegion r : regions) {
+            HeapRegionType t = r.type();
+            if (t.isFree()) free++;
+            else if (t.isYoung()) young++;
+            else if (t.isOld()) old++;
+            else if (t.isHumongous()) humongous++;
+            else other++;
+            used += r.used();
+        }
+        check("存在非空闲 region", regions.size() - free > 0, "free=" + free);
+        check("已用字节 > 0", used > 0, "used=" + used + "B");
+
+        Set<Long> klasses = HeapScanner.collectAllKlassAddrs();
+        check("HeapScanner: 收集到的 Klass > 100", klasses.size() > 100, "count=" + klasses.size());
+
+        System.out.printf("  regions: total=%d free=%d young=%d old=%d humongous=%d other=%d used=%dMB%n",
+                regions.size(), free, young, old, humongous, other, used / (1024 * 1024));
+        System.out.println("  " + g1);
+    }
+
+    private static void codeCacheChecks() {
+
+        long acc = 0;
+        for (int i = 0; i < 300_000; i++) {
+            acc += hot(i);
+        }
+        check("hot() 被执行（防优化）", acc != 0, "acc=" + acc);
+
+        InstanceKlass ik = new InstanceKlass(Jdk21Main.class);
+        Method hot = ik.findMethod("hot", "(I)I");
+        check("找到 hot(I)I", hot != null);
+        if (hot == null) return;
+
+        check("hot() 已被 JIT 编译", hot.code != 0,
+                "code=0x" + Long.toHexString(hot.code));
+        if (hot.code == 0) return;
+
+        NMethod nm = new NMethod(hot.code);
+        check("NMethod 地址 == Method.code", nm.getAddress() == hot.code);
+        check("isNmethod()", nm.isNmethod());
+        check("state 合法", nm.state >= NMethod.IN_USE && nm.state <= NMethod.ZOMBIE, nm.stateName());
+        check("state 为 in_use", nm.isInUse(), nm.stateName());
+        check("compLevel 在 0..4", nm.compLevel >= 0 && nm.compLevel <= 4, "compLevel=" + nm.compLevel);
+        check("size > 0", nm.size > 0, "size=" + nm.size);
+        check("codeBegin < codeEnd", nm.codeBegin != 0 && nm.codeBegin < nm.codeEnd,
+                String.format("0x%x..0x%x", nm.codeBegin, nm.codeEnd));
+        check("codeSize 与区间一致", nm.codeSize() == (int) (nm.codeEnd - nm.codeBegin),
+                "codeSize=" + nm.codeSize());
+        check("entryPoint 落在 code 区间内",
+                nm.entryPoint >= nm.codeBegin && nm.entryPoint <= nm.codeEnd,
+                String.format("entry=0x%x, code=0x%x..0x%x", nm.entryPoint, nm.codeBegin, nm.codeEnd));
+        check("verifiedEntryPoint 落在 code 区间内",
+                nm.verifiedEntryPoint >= nm.codeBegin && nm.verifiedEntryPoint <= nm.codeEnd,
+                String.format("0x%x", nm.verifiedEntryPoint));
+        check("nmethod 关联的 Method 是 hot",
+                nm.getMethod() != null && "hot".equals(nm.getMethod().name()),
+                nm.getMethod() == null ? "null" : nm.getMethod().name());
+        check("frameSize >= 0", nm.frameSize >= 0, "frameSize=" + nm.frameSize);
+
+        System.out.println("  " + nm);
+    }
+
+    private static int hot(int x) {
+        int s = 0;
+        for (int i = 0; i < 8; i++) {
+            s += (x * i) ^ (x >>> 3);
+        }
+        return s + Integer.bitCount(x);
+    }
+
+    private static void threadChecks() {
+        long listAddr = ThreadsSMRSupport.javaThreadList();
+        check("javaThreadList 非 0", listAddr != 0);
+        if (listAddr == 0) return;
+
+        ThreadsList list = new ThreadsList(listAddr);
+        check("ThreadsList.length > 0", list.length > 0, "count=" + list.length);
+
+        List<Thread> threads = UnsafeUtils.getAllThreads();
+        check("getAllThreads 非空", !threads.isEmpty(), "count=" + threads.size());
+        check("包含当前线程", threads.contains(Thread.currentThread()),
+                "threads=" + threads.stream().map(Thread::getName).toList());
+
+        int nonNull = 0;
+        for (int i = 0; i < list.length; i++) {
+            if (list.threadAt(i) != null) nonNull++;
+        }
+        check("threadAt 全部可读", nonNull == list.length, "read=" + nonNull + "/" + list.length);
+
+        System.out.println("  " + list + " -> " + threads.stream().map(Thread::getName).toList());
+    }
+
+    private static void cpExpansionChecks() {
+        Class<?> scratch = defineScratchClass();
+        check("替身类已定义（独立 ClassLoader）", scratch != null && scratch != Jdk21Main.class);
+        if (scratch == null) return;
+
+        InstanceKlass ik = new InstanceKlass(scratch);
+        check("替身类名字", "net/hotspot/cplus/jdk21/Jdk21Main".equals(ik.getName()), ik.getName());
+
+        int oldLen = ik.getConstantPool().length;
+        check("原常量池长度 > 0", oldLen > 0, "len=" + oldLen);
+
+        int utf8Idx = ik.addUtf8("java/util/ArrayList", java.util.ArrayList.class);
+
+        check("addUtf8 返回有效下标", utf8Idx > 0, "idx=" + utf8Idx + ", oldLen=" + oldLen);
+
+        ConstantPool expanded = new ConstantPool(ik.currentCpAddress());
+        long sym = expanded.symbolAt(utf8Idx);
+        check("新 Utf8 可解析", sym != 0 && "java/util/ArrayList".equals(new Symbol(sym).value),
+                sym == 0 ? "sym=0" : new Symbol(sym).value);
+
+        int classIdx = ik.addClass("java/util/ArrayList", java.util.ArrayList.class);
+        check("addClass 返回更新下标", classIdx > utf8Idx, "idx=" + classIdx);
+
+        long oldCpAddr = ik.constants;
+        ik.commitCpChanges();
+        check("commit 后 constants 指向扩展池", ik.constants != oldCpAddr,
+                String.format("0x%x -> 0x%x", oldCpAddr, ik.constants));
+        check("commit 后常量池变长", ik.getConstantPool().length > oldLen,
+                oldLen + " -> " + ik.getConstantPool().length);
+
+        ConstantPool after = new ConstantPool(ik.constants);
+        long symAfter = after.symbolAt(utf8Idx);
+        check("commit 后新 Utf8 仍可解析",
+                symAfter != 0 && "java/util/ArrayList".equals(new Symbol(symAfter).value));
+
+        CodeBuilder cb = new CodeBuilder();
+        cb.iconst(1);
+        cb.ireturn();
+        byte[] code = cb.build(ik);
+        check("CodeBuilder 生成字节码", code.length > 0, "len=" + code.length);
+        check("CodeBuilder 产物为 iconst_1;ireturn", code.length == 2
+                && code[0] == 0x04 && code[1] == (byte) 0xAC,
+                String.format("%02x %02x", code[0] & 0xFF, code.length > 1 ? code[1] & 0xFF : 0));
+    }
+
+    private static Class<?> defineScratchClass() {
+        try (java.io.InputStream in = Jdk21Main.class.getResourceAsStream("Jdk21Main.class")) {
+            if (in == null) return null;
+            byte[] bytes = in.readAllBytes();
+            ClassLoader loader = new ClassLoader(Jdk21Main.class.getClassLoader()) {
+                @Override
+                protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                    if (Jdk21Main.class.getName().equals(name)) {
+                        Class<?> c = findLoadedClass(name);
+                        if (c == null) {
+                            c = defineClass(name, bytes, 0, bytes.length);
+                        }
+                        if (resolve) resolveClass(c);
+                        return c;
+                    }
+                    return super.loadClass(name, resolve);
+                }
+            };
+            return loader.loadClass(Jdk21Main.class.getName());
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return null;
+        }
+    }
+
+    private static void bytecodePatchChecks() {
+        check("修改前 target(10) == 11", PatchTarget.target(10) == 11, "actual=" + PatchTarget.target(10));
+
+        InstanceKlass ik = new InstanceKlass(PatchTarget.class);
+        Method target = ik.findMethod("target", "(I)I");
+        check("找到 target(I)I", target != null);
+        if (target == null) return;
+        check("target 尚未编译", target.code == 0, "code=0x" + Long.toHexString(target.code));
+
+        int oldLen = ik.getConstantPool().length;
+        CodeBuilder cb = new CodeBuilder();
+        cb.iload(0);
+        cb.invokestatic(ik, PatchTarget.class, "helper", "(I)I");
+        cb.ireturn();
+        byte[] code = cb.build(ik);
+        check("生成 iload_0/invokestatic/ireturn", code.length == 5,
+                "len=" + code.length + ", bytes=" + hex(code));
+
+        ConstMethod cm = new ConstMethod(target.constMethod);
+        int capacity = (int) (cm.constMethodSizeInBytes() - ConstMethod.CONST_METHOD_HEADER_SIZE);
+        check("新代码放得下（按 ConstMethod 容量）", code.length <= capacity,
+                "new=" + code.length + ", capacity=" + capacity);
+
+        cm.putCodeAndResize(code);
+        ik.commitCpChanges();
+        check("commit 后常量池变长", ik.getConstantPool().length > oldLen,
+                oldLen + " -> " + ik.getConstantPool().length);
+
+        int r = PatchTarget.target(10);
+        check("修改后 target(10) == 20", r == 20, "actual=" + r);
+        check("未改动的方法不受影响", PatchTarget.untouched(1) == 101,
+                "actual=" + PatchTarget.untouched(1));
+
+        // sipush 的操作数不是常量池索引，必须按大端写
+        Method untouched = ik.findMethod("untouched", "(I)I");
+        check("找到 untouched(I)I", untouched != null);
+        if (untouched != null) {
+            CodeBuilder cb2 = new CodeBuilder();
+            cb2.sipush(1000);
+            cb2.ireturn();
+            byte[] code2 = cb2.build(ik);
+            check("sipush 1000 编码为大端 11 03 e8 ac",
+                    code2.length == 4 && code2[1] == 0x03 && code2[2] == (byte) 0xE8,
+                    "bytes=" + hex(code2));
+
+            ConstMethod cm2 = new ConstMethod(untouched.constMethod);
+            cm2.putCodeAndResize(code2);
+            check("修改后 untouched(0) == 1000", PatchTarget.untouched(0) == 1000,
+                    "actual=" + PatchTarget.untouched(0));
+        }
+
+        // 超出 ConstMethod 容量的字节码必须被拒绝，而不是写穿内存
+        CodeBuilder cb3 = new CodeBuilder();
+        for (int i = 0; i < 400; i++) {
+            cb3.nop();
+        }
+        byte[] big = cb3.build();
+        try {
+            new ConstMethod(target.constMethod).putCodeAndResize(big);
+            check("超长字节码被拒绝", false, "没有抛异常");
+        } catch (IllegalArgumentException e) {
+            check("超长字节码被拒绝", true, e.getMessage());
+        }
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x ", b & 0xFF));
+        }
+        return sb.toString().trim();
+    }
+
+    private static void errorPaths() {        try {
+            new Klass(0L);
+            check("地址 0 抛 IllegalArgumentException", false, "没有抛异常");
+        } catch (IllegalArgumentException e) {
+            check("地址 0 抛 IllegalArgumentException", true, e.getMessage());
+        }
+
+        try {
+            new Klass(String.class).primarySuperOfDepth(8);
+            check("primarySuperOfDepth(8) 越界", false, "没有抛异常");
+        } catch (IndexOutOfBoundsException e) {
+            check("primarySuperOfDepth(8) 越界", true, e.getMessage());
+        }
+    }
+
+    private static void setupConsole() {
+        Charset charset = resolveConsoleCharset();
+        System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, charset));
+        System.setErr(new PrintStream(new FileOutputStream(FileDescriptor.err), true, charset));
+        System.setProperty("jdk21.console.charset", charset.name());
+    }
+
+    private static Charset resolveConsoleCharset() {
+        String override = System.getProperty("jdk21.console.encoding");
+        if (override != null && !override.isEmpty()) {
+            try {
+                return Charset.forName(override);
+            } catch (Exception ignored) {
+
+            }
+        }
+        if (System.console() != null) {
+            String nativeEncoding = System.getProperty("native.encoding");
+            if (nativeEncoding == null) {
+                nativeEncoding = System.getProperty("sun.jnu.encoding");
+            }
+            if (nativeEncoding != null) {
+                try {
+                    return Charset.forName(nativeEncoding);
+                } catch (Exception ignored) {
+
+                }
+            }
+        }
+        return StandardCharsets.UTF_8;
+    }
+
+    private static void section(String title) {
+        System.out.println();
+        System.out.println("== " + title + " ==");
+    }
+
+    private static void check(String label, boolean ok) {
+        check(label, ok, "");
+    }
+
+    private static void check(String label, boolean ok, String detail) {
+        if (ok) {
+            passed++;
+        } else {
+            failed++;
+            failures.add(label + (detail == null || detail.isEmpty() ? "" : " -> " + detail));
+        }
+        System.out.printf("  [%s] %s%s%n",
+                ok ? "PASS" : "FAIL", label,
+                detail == null || detail.isEmpty() ? "" : "   (" + detail + ")");
+    }
+
+    private static void summary() {
+        System.out.println();
+        System.out.println("==================================================");
+        System.out.println("通过: " + passed + "    失败: " + failed);
+        if (failed == 0) {
+            System.out.println("结果: PASS");
+        } else {
+            System.out.println("结果: FAIL");
+            for (String f : failures) {
+                System.out.println("  - " + f);
+            }
+        }
+        System.out.println("==================================================");
+        if (failed > 0) {
+            System.exit(1);
+        }
+    }
+
+    private static String vmOption(HotSpotDiagnosticMXBean bean, String name) {
+        try {
+            return bean.getVMOption(name).getValue();
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
+
+    private static Long offsetOrNull(String typeAndField) {
+        try {
+            return VMStructsHelper.findOffset(typeAndField);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private Jdk21Main() {
+    }
+}

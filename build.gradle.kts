@@ -18,8 +18,8 @@ dependencies {
 tasks.jar {
     manifest {
         attributes(
-            "Premain-Class" to "net.hotspot.cplus.agent.AgentMain",
-            "Agent-Class" to "net.hotspot.cplus.agent.AgentMain",
+            "Premain-Class" to "net.hotspot.cplus.jdk17.agent.AgentMain",
+            "Agent-Class" to "net.hotspot.cplus.jdk17.agent.AgentMain",
             "Can-Redefine-Classes" to "true",
             "Can-Retransform-Classes" to "true",
             "Implementation-Title" to "My Java Agent",
