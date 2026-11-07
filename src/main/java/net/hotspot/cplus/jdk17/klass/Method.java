@@ -117,6 +117,34 @@ public class Method extends Metadata {
     public static long accessFlagsFieldOffset()  { return ACCESS_FLAGS_OFFSET; }
     public static long intrinsicIdFieldOffset()  { return INTRINSIC_ID_OFFSET; }
     public static long flagsFieldOffset()        { return FLAGS_OFFSET; }
+
+    private static final int FLAG_DONT_INLINE = 1 << 2;
+
+    public void setNotCompilable() {
+        long base = getAddress();
+        if (base == 0) return;
+
+        int af = unsafe.getInt(base + ACCESS_FLAGS_OFFSET);
+        af |= AccessFlags.JVM_ACC_NOT_C1_COMPILABLE
+                | AccessFlags.JVM_ACC_NOT_C2_COMPILABLE
+                | AccessFlags.JVM_ACC_NOT_C2_OSR_COMPILABLE;
+        unsafe.putInt(base + ACCESS_FLAGS_OFFSET, af);
+
+        short f = (short) (unsafe.getShort(base + FLAGS_OFFSET) | FLAG_DONT_INLINE);
+        unsafe.putShort(base + FLAGS_OFFSET, f);
+
+        readFields();
+    }
+
+    public boolean isDontInline() {
+        return (flags & FLAG_DONT_INLINE) != 0;
+    }
+
+    public boolean isNotCompilable() {
+        return (accessFlags & AccessFlags.JVM_ACC_NOT_C1_COMPILABLE) != 0
+                || (accessFlags & AccessFlags.JVM_ACC_NOT_C2_COMPILABLE) != 0;
+    }
+
     public NMethod code() {
         if (code == 0) return null;
         return new NMethod(code);

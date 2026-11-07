@@ -116,6 +116,73 @@ public class Method extends Metadata {
         return new AccessFlags(accessFlags);
     }
 
+    /**
+     * 让方法回到解释执行：清掉 {@code _code}，把入口指回解释器。
+     *
+     * <p>只改字节码（{@link ConstMethod#putCodeAndResize}）对已经 JIT 编译的方法无效，
+     * 因为调用走的是 nmethod；先调用本方法再改字节码，后续调用才会执行新字节码。
+     *
+     * <p>做法与 jdk17 版本一致：{@code _from_compiled_entry} 用 adapter 的 c2i 入口
+     * （编译代码调用进来时做帧转换），{@code _from_interpreted_entry} 指回 i2i 入口。
+     */
+    public void forceInterpreted() {
+        long base = getAddress();
+        if (base == 0) return;
+
+        long i2iEntry = UnsafeUtils.unsafe.getLong(base + I2I_ENTRY_OFFSET);
+        long adapter  = UnsafeUtils.unsafe.getLong(base + ADAPTER_OFFSET);
+
+        long c2iEntry = i2iEntry;
+        if (adapter != 0) {
+            long candidate = UnsafeUtils.unsafe.getLong(adapter + 32L);
+            if (candidate != 0) {
+                c2iEntry = candidate;
+            }
+        }
+
+        UnsafeUtils.unsafe.storeFence();
+        UnsafeUtils.unsafe.putLong(base + CODE_OFFSET, 0L);
+        UnsafeUtils.unsafe.putLong(base + FROM_COMPILED_ENTRY_OFFSET, c2iEntry);
+        UnsafeUtils.unsafe.putLong(base + FROM_INTERPRETED_ENTRY_OFFSET, i2iEntry);
+        UnsafeUtils.unsafe.storeFence();
+
+        readFields();
+    }
+
+    // MethodFlags（methodFlags.hpp，JDK 21）
+    private static final int FLAG_IS_NOT_C2_COMPILABLE     = 1 << 8;
+    private static final int FLAG_IS_NOT_C1_COMPILABLE     = 1 << 9;
+    private static final int FLAG_IS_NOT_C2_OSR_COMPILABLE = 1 << 10;
+    private static final int FLAG_DONT_INLINE              = 1 << 12;
+
+    /**
+     * 禁止该方法再被 C1/C2 编译，并禁止内联。
+     *
+     * <p>替换过字节码的方法不能再交给编译器：新字节码里的常量池索引按解释器的
+     * cache index 约定写入，编译器重新解析时可能访问到非法的 CP 条目而崩溃
+     * （实测 C1 在编译调用方、内联该方法时会 EXCEPTION_ACCESS_VIOLATION）。
+     */
+    public void setNotCompilable() {
+        long base = getAddress();
+        if (base == 0) return;
+
+        int flags = UnsafeUtils.unsafe.getInt(base + FLAGS_OFFSET);
+        flags |= FLAG_DONT_INLINE
+                | FLAG_IS_NOT_C1_COMPILABLE
+                | FLAG_IS_NOT_C2_COMPILABLE
+                | FLAG_IS_NOT_C2_OSR_COMPILABLE;
+        UnsafeUtils.unsafe.putInt(base + FLAGS_OFFSET, flags);
+        readFields();
+    }
+
+    public boolean isDontInline() {
+        return (flags & FLAG_DONT_INLINE) != 0;
+    }
+
+    public boolean isNotCompilable() {
+        return (flags & (FLAG_IS_NOT_C1_COMPILABLE | FLAG_IS_NOT_C2_COMPILABLE)) != 0;
+    }
+
     public static long accessFlagsFieldOffset() { return ACCESS_FLAGS_OFFSET; }
     public static long intrinsicIdFieldOffset() { return INTRINSIC_ID_OFFSET; }
     public static long flagsFieldOffset()       { return FLAGS_OFFSET; }

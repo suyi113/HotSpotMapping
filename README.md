@@ -62,11 +62,14 @@ net.hotspot.cplus.jdkXX
 
 ### 自检
 
-`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换，共 **185 项检查**：
+`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`），共 **205 项检查**：
 
 ```bash
 ./gradlew testClasses
 java -cp "build/classes/java/main;build/classes/java/test" net.hotspot.cplus.jdk21.Jdk21Main
+
+# jdk17 那一份（需用 JDK 17 运行）
+java -cp "build/classes/java/main;build/classes/java/test" net.hotspot.cplus.jdk17.Jdk17PatchMain
 ```
 
 样例输出见仓库根目录的 `jdk21-check.log`。
@@ -139,21 +142,30 @@ if (m.code != 0) {
 InstanceKlass ik = new InstanceKlass(PatchTarget.class);
 Method target = ik.findMethod("target", "(I)I");
 
+target.forceInterpreted();          // 若方法已被 JIT 编译，先把入口切回解释器
+
 CodeBuilder cb = new CodeBuilder();
 cb.iload(0);
-cb.invokestatic(ik, PatchTarget.class, "helper", "(I)I");   // 会自动扩展常量池
+cb.invokestatic(ik, ExternalHelper.class, "twice", "(I)I");   // 调外部类的方法，会自动扩展常量池
 cb.ireturn();
 
 ConstMethod cm = new ConstMethod(target.constMethod);
 cm.putCodeAndResize(cb.build(ik));   // 超出 ConstMethod 容量会抛 IllegalArgumentException
 ik.commitCpChanges();                // 切换 Klass/ConstMethod/ConstantPoolCache 的指针
+target.setNotCompilable();           // 必须：禁止 C1/C2 再编译和内联该方法
 ```
 
 注意：
 
-- 只对**尚未编译**的方法有效；已被 JIT 编译的方法会继续执行 nmethod，需要先做反优化（本项目暂未移植 `Method.forceInterpreted`）；
+- 对**已 JIT 编译**的方法，先调用 `Method.forceInterpreted()` 把入口切回解释器，再替换字节码，否则调用仍走 nmethod；
+- 替换后**必须**调用 `Method.setNotCompilable()`（置 `dont_inline` + not-c1/c2/OSR-compilable）。否则 C1 编译调用方、内联这个被改过的方法时会读坏 CP 条目，直接 `EXCEPTION_ACCESS_VIOLATION`；实测 30 万次热调用即可复现；
 - 常量池扩展要求目标类**已经链接**（`ConstantPoolCache` 非空），否则 `addMethodref` 会抛 `CPC is null`；
 - 常量池索引与字节码里的 cache index 一致是建立在「新条目按同一索引追加」的前提上的，属于实验性做法。
+
+更激进的例子：把 `sun.misc.Unsafe.getUnsafe()`（几乎没有调用方的静态方法）改写成
+「调用自己的打印方法 + 返回 null」。调用 `Unsafe.getUnsafe()` 会打印
+`[PATCHED] patched method was called` 并返回 null——说明常量池扩展和提交对
+CDS 共享的 JDK 类同样有效（见 `Jdk21Main.unsafePatchChecks`）。
 
 ## 版本差异备忘
 

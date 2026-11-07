@@ -93,6 +93,12 @@ public final class Jdk21Main {
         section("字节码修改（真执行）");
         bytecodePatchChecks();
 
+        section("反优化（编译后再替换）");
+        deoptPatchChecks();
+
+        section("修改 JDK 内部类（sun.misc.Unsafe）");
+        unsafePatchChecks();
+
         section("异常路径");
         errorPaths();
 
@@ -688,13 +694,18 @@ public final class Jdk21Main {
         check("target 尚未编译", target.code == 0, "code=0x" + Long.toHexString(target.code));
 
         int oldLen = ik.getConstantPool().length;
+        check("替换前常量池不含 ExternalHelper",
+                !cpHasClass(ik.getConstantPool(), "net/hotspot/cplus/jdk21/ExternalHelper"));
         CodeBuilder cb = new CodeBuilder();
         cb.iload(0);
-        cb.invokestatic(ik, PatchTarget.class, "helper", "(I)I");
+        cb.invokestatic(ik, ExternalHelper.class, "twice", "(I)I");
         cb.ireturn();
         byte[] code = cb.build(ik);
         check("生成 iload_0/invokestatic/ireturn", code.length == 5,
                 "len=" + code.length + ", bytes=" + hex(code));
+        check("扩展后常量池含 ExternalHelper",
+                cpHasClass(new ConstantPool(ik.currentCpAddress()),
+                        "net/hotspot/cplus/jdk21/ExternalHelper"));
 
         ConstMethod cm = new ConstMethod(target.constMethod);
         int capacity = (int) (cm.constMethodSizeInBytes() - ConstMethod.CONST_METHOD_HEADER_SIZE);
@@ -705,6 +716,13 @@ public final class Jdk21Main {
         ik.commitCpChanges();
         check("commit 后常量池变长", ik.getConstantPool().length > oldLen,
                 oldLen + " -> " + ik.getConstantPool().length);
+
+        ConstantPool afterCp = new ConstantPool(ik.constants);
+        int cpIdx = (code[2] & 0xFF) | ((code[3] & 0xFF) << 8);
+        int classIdx = (int) (afterCp.slotAt(cpIdx) & 0xFFFF);
+        check("invokestatic 指向 ExternalHelper",
+                "net/hotspot/cplus/jdk21/ExternalHelper".equals(cpClassName(afterCp, classIdx)),
+                cpClassName(afterCp, classIdx));
 
         int r = PatchTarget.target(10);
         check("修改后 target(10) == 20", r == 20, "actual=" + r);
@@ -749,6 +767,117 @@ public final class Jdk21Main {
             sb.append(String.format("%02x ", b & 0xFF));
         }
         return sb.toString().trim();
+    }
+
+    private static String cpClassName(ConstantPool cp, int classIdx) {
+        long slot = cp.slotAt(classIdx);
+        int nameIdx = (int) ((slot >>> 16) & 0xFFFF);
+        long sym = cp.symbolAt(nameIdx);
+        return sym == 0 ? null : new Symbol(sym).value;
+    }
+
+    private static boolean cpHasClass(ConstantPool cp, String className) {
+        for (int i = 1; i < cp.length; i++) {
+            int tag = UnsafeUtils.unsafe.getByte(cp.tags + 4 + i) & 0xFF;
+            if (tag == 7 && className.equals(cpClassName(cp, i))) {
+                return true;
+            }
+            if (tag == 5 || tag == 6) i++;
+        }
+        return false;
+    }
+
+    private static void deoptPatchChecks() {
+        long acc = 0;
+        for (int i = 0; i < 300_000; i++) {
+            acc += PatchTarget.compiled(i);
+        }
+        check("compiled() 已执行", acc != 0, "acc=" + acc);
+
+        InstanceKlass ik = new InstanceKlass(PatchTarget.class);
+        Method m = ik.findMethod("compiled", "(I)I");
+        check("找到 compiled(I)I", m != null);
+        if (m == null) return;
+
+        check("compiled() 已被 JIT 编译", m.code != 0,
+                "code=0x" + Long.toHexString(m.code));
+        check("替换前 compiled(10) == 289", PatchTarget.compiled(10) == 289,
+                "actual=" + PatchTarget.compiled(10));
+
+        m.forceInterpreted();
+        check("forceInterpreted 后 code == 0", m.code == 0,
+                "code=0x" + Long.toHexString(m.code));
+
+        CodeBuilder cb = new CodeBuilder();
+        cb.iload(0);
+        cb.invokestatic(ik, ExternalHelper.class, "twice", "(I)I");
+        cb.ireturn();
+        ConstMethod cm = new ConstMethod(m.constMethod);
+        cm.putCodeAndResize(cb.build(ik));
+        ik.commitCpChanges();
+        m.setNotCompilable();
+        check("setNotCompilable 生效", m.isNotCompilable() && m.isDontInline(),
+                "flags=0x" + Integer.toHexString(m.flags));
+
+        int r = PatchTarget.compiled(10);
+        check("反优化 + 替换后 compiled(10) == 20", r == 20, "actual=" + r);
+
+        long sum = 0;
+        for (int i = 0; i < 300_000; i++) {
+            sum += PatchTarget.compiled(i);
+        }
+        check("30 万次热调用不崩溃", sum != 0, "sum=" + sum);
+        check("热调用后仍执行新字节码", PatchTarget.compiled(10) == 20,
+                "actual=" + PatchTarget.compiled(10));
+        check("方法没有被重新编译", m.code == 0, "code=0x" + Long.toHexString(m.code));
+
+        System.out.println("  " + m);
+    }
+
+    private static void unsafePatchChecks() {
+        Class<?> unsafeClass;
+        try {
+            unsafeClass = Class.forName("sun.misc.Unsafe");
+        } catch (Throwable t) {
+            check("加载 sun.misc.Unsafe", false, t.toString());
+            return;
+        }
+        check("加载 sun.misc.Unsafe", true);
+
+        boolean threw = false;
+        try {
+            sun.misc.Unsafe.getUnsafe();
+        } catch (SecurityException e) {
+            threw = true;
+        }
+        check("原 getUnsafe() 抛 SecurityException", threw);
+
+        InstanceKlass ik = new InstanceKlass(unsafeClass);
+        Method m = ik.findMethod("getUnsafe", "()Lsun/misc/Unsafe;");
+        check("找到 Unsafe.getUnsafe", m != null);
+        if (m == null) return;
+
+        m.forceInterpreted();
+        PatchPrint.printed = false;
+
+        CodeBuilder cb = new CodeBuilder();
+        cb.invokestatic(ik, PatchPrint.class, "print", "()V");
+        cb.aconst_null();
+        cb.areturn();
+        byte[] code = cb.build(ik);
+        check("生成 print()+aconst_null+areturn", code.length == 5, "len=" + code.length);
+
+        new ConstMethod(m.constMethod).putCodeAndResize(code);
+        ik.commitCpChanges();
+        m.setNotCompilable();
+
+        Object r = sun.misc.Unsafe.getUnsafe();
+        check("patch 后 getUnsafe() 返回 null", r == null, String.valueOf(r));
+        check("patch 后确实调用了 PatchPrint.print", PatchPrint.printed);
+        check("Unsafe.getUnsafe 已被标记为不可编译", m.isNotCompilable() && m.isDontInline(),
+                "flags=0x" + Integer.toHexString(m.flags));
+
+        System.out.println("  " + m);
     }
 
     private static void errorPaths() {        try {

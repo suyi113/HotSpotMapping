@@ -13,4 +13,12 @@ public class PatchTarget {
     public static int untouched(int x) {
         return x + 100;
     }
+
+    public static int compiled(int x) {
+        int s = 0;
+        for (int i = 0; i < 8; i++) {
+            s += (x * i) ^ (x >>> 3);
+        }
+        return s + 1;
+    }
 }
