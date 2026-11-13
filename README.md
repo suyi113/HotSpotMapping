@@ -62,7 +62,7 @@ net.hotspot.cplus.jdkXX
 
 ### 自检
 
-`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`）/ UnsafeUtils 工具方法 / 类还原，共 **232 项检查**：
+`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`）/ UnsafeUtils 工具方法 / 类还原 / Shellcode 调用本地函数 / C 层字段寻址（含扫描 VMStructs 缺失字段），共 **260 项检查**：
 
 ```bash
 ./gradlew testClasses
@@ -185,6 +185,101 @@ int n = UnsafeUtils.restoreClass(MyClass.class);
 
 限制：按「同名同签名」匹配方法。class 文件里没有的运行时方法不会被删除，
 class 文件里有但运行时没有的方法也不会凭空创建（那需要重建 `InstanceKlass`）。
+
+### C 层字段寻址（CNative）
+
+```java
+CNative.symbol("gHotSpotVMStructs");                      // findNative 优先，失败走 PE 导出表
+CNative.fieldOffset("JavaThread::_anchor");               // VMStructs 偏移（实测 920）
+CNative.fieldAddress(thread, "JavaThread::_anchor");      // base + offset
+CNative.fieldInt(thread, "JavaThread::_thread_state");    // 读字段
+CNative.findFieldByValue(base, 0x1122334455667788L, 64);  // 已知值反查字段偏移
+CNative.findPointer(start, end, value);                   // 找指向某值的指针
+CNative.deref(base, 16, 8);                               // 指针链取值
+CNative.addressOf(base, 16, 8);                           // 指针链求地址（最后一段只加偏移）
+```
+
+四种手段：**VMStructs 偏移**、**符号解析**（findNative / PE 导出表）、**内存扫描**（已知值反查字段）、
+**指针链跟踪**（如 `Klass::_java_mirror` → handle → oop）。
+
+**验证「VMStructs 里没有的字段」也能找到**：`JavaThread::_jni_environment` 不在 VMStructs 里
+（`findOffset` 抛异常），`CNative.jniEnvironment(thread)` 用扫描找它——判据是 JavaThread 里某个
+字段指向 jvm.dll 的 `JNINativeInterface_` 表（前 4 项为 NULL，后面是 jvm.dll 内的 JNI 函数指针）。
+实测：jdk21 偏移 **952**、jdk17 偏移 **688**；另一个线程扫描得到同一偏移；表指针和
+`GetVersion` 函数指针都非 0。
+
+### Shellcode 调用本地函数
+
+```java
+long pidFn = Shellcode.kernel32("GetCurrentProcessId");   // 解析 kernel32 函数地址
+InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+Method m = ik.findMethod("shell", "()J");
+Shellcode.write(m, Shellcode.call(pidFn));                 // 把 stub 写进已编译方法的 entry
+long pid = ShellTarget.shell();                            // 实际执行 shellcode
+```
+
+- `moduleBase` / `export`：从 `gHotSpotVMStructs` 地址反查 jvm.dll 的 PE 基址，解析导出表；
+- `kernel32(name)`：解析 jvm.dll 的导入表，拿到 kernel32 函数地址；
+- `call(target)`：生成 `push rbp; mov rbp,rsp; and rsp,-16; mov rax,target; call rax; ...; ret` 的 x64 stub；
+- `write(m, code)`：写到 nmethod 的 verified entry（code cache 在 Windows 上可写）。
+
+注意：改的是已编译方法的机器码，所以调用要通过 compiled entry（例如从一个没预热过的
+解释执行方法里调用），并且之后不要再依赖该方法的原有行为。JDK 17 / 21 都在 Windows x64
+上验证通过（返回值就是 `ProcessHandle.current().pid()`）。
+
+#### 地址锁定与 JVM 入口
+
+- `exportOf(addr)`：拿地址反查 jvm.dll 导出名，用来确认解析出来的函数确实是目标
+  （测试里断言 `exportOf(symbol("JVM_GC")) == "JVM_GC"`）；
+- `jniEnv(thread)`：`JavaThread::_jni_environment` 在 VMStructs 里没有导出，改为手动扫描
+  JavaThread 对象，找「指向 jvm.dll 里 JNINativeInterface_ 函数表」的字段，得到 `JNIEnv*`；
+- `callJvmEnv(target, env, thread, stateOffset)`：调用前把线程状态切成 `_thread_in_native(3)`，
+  返回后恢复 `_thread_in_Java(7)`。
+
+`JVM_*` 是 `JVM_ENTRY` 宏，`ThreadInVMfromNative` 假定调用方来自真正的 native 帧
+（见 [javaThread.hpp](https://android.googlesource.com/toolchain/jdk/jdk21/+/1deb1e2e52ca68a3ba34da1af83fb7d3b4eef077/src/hotspot/share/runtime/javaThread.hpp)）。
+实测 `JVM_CurrentTimeMillis` 曾成功返回当前时间，但 `JVM_GC` 会 safepoint、在假帧上
+栈遍历而崩；所以 **catalog 只对 JVM 符号做解析/反查，不把 JVM_* 调用列为稳定用例**，
+Windows API 才是稳定可调用的。
+
+#### 伪造 native 帧的尝试（实验）
+
+从 JDK 源码看（[javaFrameAnchor.hpp](https://raw.githubusercontent.com/openjdk/jdk21u/master/src/hotspot/share/runtime/javaFrameAnchor.hpp)、
+[sharedRuntime_x86_64.cpp](https://raw.githubusercontent.com/jatin-bhateja/jdk/f82741e0c47f5e9cd658dbd18ee2e69dd7be8cd6/src/hotspot/cpu/x86/sharedRuntime_x86_64.cpp)）：
+
+- `JavaFrameAnchor` 的布局是 `_last_Java_sp`(+0)、`_last_Java_pc`(+8)、CPU 头里的 `_last_Java_fp`(+16)；
+- native wrapper 在调 native 前执行 `set_last_Java_frame(rsp, noreg, the_pc)`，
+  `the_pc` 是 **wrapper 自己的代码地址**，并且之前 `oop_maps->add_gc_map(the_pc - start, map)`
+  登记过 oopmap；随后把 `_thread_state` 设为 `_thread_in_native`，再 `call native_func`。
+
+也就是说，anchor 指向的是 **带 oopmap 的 wrapper 代码**，不是调用方 Java 帧。`callJvmAnchored`
+按 `{sp, pc, fp}` 正确布局塞了调用方编译帧（`sp = rbp+8`、`pc = [rbp+8]`、`fp = rbp`），
+但我们的 shellcode 在 Java nmethod 里，没有对应的 oopmap；而且 209 字节的 stub 会越过
+`ShellTarget.shell` nmethod 的代码区、踩到相邻的 nmethod，实测仍在 code cache 里崩。
+
+结论：要真正复刻，必须让 shellcode 跑在**有 oopmap 的 native wrapper** 里。
+`hookNativeWrapper(holder, name, sig, shellcode)` 已写好雏形：定位 native wrapper 里
+`E8 rel32` 的 `call native_func` 并改写到 shellcode；但 JDK 21 里 native 方法的
+`Method::_code` 为 0（wrapper 不在 `_code` 里），需要从 `Method::from_compiled_entry`
+或 `CodeCache` 遍历里找 wrapper，是下一步。
+`callJvmAnchored`、`callJvmEnv`、`hookNativeWrapper` 都保留为实验 API。
+
+#### 能调用哪些函数（测试里的 catalog）
+
+**Windows（kernel32 等，通过 jvm.dll 导入表解析，可直接调用）：**
+
+| 函数 | 验证方式 |
+|---|---|
+| `GetCurrentProcessId()` | 等于 `ProcessHandle.current().pid()` |
+| `GetCurrentThreadId()` | 非 0 |
+| `GetTickCount64()` | 非 0 |
+| `IsProcessorFeaturePresent(17)` | 返回 0/1（带参数 stub：rcx） |
+
+**JVM 导出（`JVM_*`）：** `symbol()` 能解析 `JVM_GC`、`JVM_ActiveProcessorCount`、
+`JVM_CurrentTimeMillis`、`JVM_TotalMemory`、`JVM_FreeMemory`、`JVM_MaxMemory` 等地址
+（测试里逐个断言非 0）。但 `JVM_*` 是 `JVM_ENTRY` 宏，需要合法的 `JNIEnv`/`JavaThread`
+状态，从裸 shellcode 直接 `call` 会崩（实测 `JVM_GC`、`JVM_ActiveProcessorCount`），
+所以 catalog 只**解析**它们，不直接调用；Windows API 才作为调用用例。
 
 ### 替换方法字节码
 

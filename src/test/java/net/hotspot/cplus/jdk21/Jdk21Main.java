@@ -3,7 +3,9 @@ package net.hotspot.cplus.jdk21;
 import net.hotspot.cplus.jdk21.classloading.ClassLoaderData;
 import net.hotspot.cplus.jdk21.codecache.CodeBuilder;
 import net.hotspot.cplus.jdk21.codecache.NMethod;
+import net.hotspot.cplus.jdk21.core.CNative;
 import net.hotspot.cplus.jdk21.core.OopDesc;
+import net.hotspot.cplus.jdk21.core.Shellcode;
 import net.hotspot.cplus.jdk21.core.VMStructs;
 import net.hotspot.cplus.jdk21.core.VMStructsHelper;
 import net.hotspot.cplus.jdk21.gc.G1CollectedHeap;
@@ -101,6 +103,15 @@ public final class Jdk21Main {
 
         section("类还原（restoreClass）");
         restoreChecks();
+
+        section("Shellcode 调用本地函数");
+        shellcodeChecks();
+
+        section("C 层字段寻址");
+        cNativeChecks();
+
+        section("扫描 VMStructs 缺失字段");
+        scanMissingFieldChecks();
 
         section("修改 JDK 内部类（sun.misc.Unsafe）");
         unsafePatchChecks();
@@ -972,6 +983,156 @@ public final class Jdk21Main {
                 !cpHasClass(ik.getConstantPool(),
                         "net/hotspot/cplus/jdk21/ExternalHelper"),
                 "cpLen=" + ik.getConstantPool().length);
+    }
+
+    private static void shellcodeChecks() {
+        long pidFn = Shellcode.kernel32("GetCurrentProcessId");
+        check("解析 kernel32!GetCurrentProcessId", pidFn != 0,
+                "0x" + Long.toHexString(pidFn));
+
+        long original = 0;
+        for (int i = 0; i < 200000; i++) {
+            original = ShellTarget.shell();
+        }
+        check("shell() 已被 JIT 编译",
+                new InstanceKlass(ShellTarget.class).findMethod("shell", "()J").code != 0);
+        check("shell() 原始返回值不是 pid", original != ProcessHandle.current().pid());
+
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method m = ik.findMethod("shell", "()J");
+        Shellcode.write(m, Shellcode.call(pidFn));
+
+        long got = callShellOnce();
+        long pid = ProcessHandle.current().pid();
+        check("shellcode 调用 GetCurrentProcessId 得到 pid", got == pid,
+                "got=" + got + ", pid=" + pid + ", original=" + original);
+
+        catalog();
+    }
+
+    private static void catalog() {
+        long ticks = runStub(Shellcode.kernel32("GetTickCount64"));
+        check("kernel32!GetTickCount64 > 0", ticks > 0, "ticks=" + ticks);
+
+        long tid = runStub(Shellcode.kernel32("GetCurrentThreadId"));
+        check("kernel32!GetCurrentThreadId > 0", tid > 0, "tid=" + tid);
+
+        long feature = runStub(Shellcode.kernel32("IsProcessorFeaturePresent"), 17);
+        check("kernel32!IsProcessorFeaturePresent(17) 是 0/1",
+                feature == 0 || feature == 1, "ret=" + feature);
+
+        String[] jvmSymbols = {"JVM_GC", "JVM_ActiveProcessorCount", "JVM_CurrentTimeMillis",
+                "JVM_TotalMemory", "JVM_FreeMemory", "JVM_MaxMemory"};
+        for (String s : jvmSymbols) {
+            long addr = Shellcode.symbol(s);
+            check("解析 jvm!" + s, addr != 0, "0x" + Long.toHexString(addr));
+        }
+        String locked = Shellcode.exportOf(Shellcode.symbol("JVM_GC"));
+        check("反查地址锁定 JVM_GC", "JVM_GC".equals(locked), String.valueOf(locked));
+    }
+
+    private static long runStub(long fn, long... args) {
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method m = ik.findMethod("shell", "()J");
+        byte[] code;
+        if (args.length == 0) {
+            code = Shellcode.call(fn);
+        } else if (args.length == 1) {
+            code = Shellcode.call(fn, args[0]);
+        } else {
+            code = Shellcode.call(fn, args[0], args[1]);
+        }
+        Shellcode.write(m, code);
+        return callShellOnce();
+    }
+
+    private static long callShellOnce() {
+        return ShellTarget.shell();
+    }
+
+    private static void cNativeChecks() {
+        check("symbol(gHotSpotVMStructs) 非 0",
+                CNative.symbol("gHotSpotVMStructs") != 0);
+        check("symbol(JVM_GC) 非 0", CNative.symbol("JVM_GC") != 0);
+
+        long thread = UnsafeUtils.currentThreadAddress();
+        long anchorOff = CNative.fieldOffset("JavaThread::_anchor");
+        check("JavaThread::_anchor 偏移 > 0", anchorOff > 0, "off=" + anchorOff);
+        check("fieldAddress = base + offset",
+                CNative.fieldAddress(thread, "JavaThread::_anchor") == thread + anchorOff);
+        check("fieldInt(thread, _thread_state) 合理",
+                CNative.fieldInt(thread, "JavaThread::_thread_state") >= 0,
+                "state=" + CNative.fieldInt(thread, "JavaThread::_thread_state"));
+
+        long mem = UnsafeUtils.unsafe.allocateMemory(64);
+        try {
+            UnsafeUtils.unsafe.putLong(mem + 24, 0x1122334455667788L);
+            check("findFieldByValue 命中 +24",
+                    CNative.findFieldByValue(mem, 0x1122334455667788L, 64) == 24);
+            check("findPointer 命中",
+                    CNative.findPointer(mem, mem + 64, 0x1122334455667788L) == mem + 24);
+
+            long inner = UnsafeUtils.unsafe.allocateMemory(32);
+            try {
+                UnsafeUtils.unsafe.putLong(inner + 8, 0xABCDL);
+                UnsafeUtils.unsafe.putLong(mem + 16, inner);
+                check("deref 指针链 (16,8)",
+                        CNative.deref(mem, 16, 8) == 0xABCDL);
+                check("addressOf 指针链 (16,8)",
+                        CNative.addressOf(mem, 16, 8) == inner + 8);
+            } finally {
+                UnsafeUtils.unsafe.freeMemory(inner);
+            }
+        } finally {
+            UnsafeUtils.unsafe.freeMemory(mem);
+        }
+    }
+
+    private static void scanMissingFieldChecks() {
+        boolean missing = false;
+        try {
+            VMStructsHelper.findOffset("JavaThread::_jni_environment");
+        } catch (Throwable t) {
+            missing = true;
+        }
+        check("VMStructs 不含 JavaThread::_jni_environment", missing);
+
+        long thread = UnsafeUtils.currentThreadAddress();
+        long env = CNative.jniEnvironment(thread);
+        check("扫描到 _jni_environment 字段", env != 0,
+                "off=" + (env - thread) + ", env=0x" + Long.toHexString(env));
+
+        long table = env == 0 ? 0 : UnsafeUtils.unsafe.getLong(env);
+        long getVersion = table == 0 ? 0 : UnsafeUtils.unsafe.getLong(table + 32);
+        check("JNIEnv 表指针非 0", table != 0, "table=0x" + Long.toHexString(table));
+        check("GetVersion 函数指针非 0", getVersion != 0,
+                "fn=0x" + Long.toHexString(getVersion));
+
+        Thread other = new Thread(() -> {
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException ignored) {
+            }
+        }, "scan-probe");
+        other.start();
+        try {
+            long otherAddr = 0;
+            for (int i = 0; i < 200 && otherAddr == 0; i++) {
+                otherAddr = UnsafeUtils.threadAddress(other);
+                if (otherAddr == 0) {
+                    try {
+                        Thread.sleep(5);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            }
+            long otherEnv = otherAddr == 0 ? 0 : CNative.jniEnvironment(otherAddr);
+            check("另一线程扫描到同一偏移",
+                    otherEnv != 0 && (otherEnv - otherAddr) == (env - thread),
+                    "off=" + (otherEnv - otherAddr) + " vs " + (env - thread));
+        } finally {
+            other.interrupt();
+        }
     }
 
     private static void errorPaths() {        try {

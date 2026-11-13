@@ -16,7 +16,7 @@ public final class Jdk17HookMain {
         Field value = String.class.getDeclaredField("value");
         check("初始不可访问", !canGet(value));
 
-        for (int i = 0; i < 500_000; i++) {
+        for (int i = 0; i < 50000_000; i++) {
             canGet(value);
         }
         check("预热后仍不可访问", !canGet(value));

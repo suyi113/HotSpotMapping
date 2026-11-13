@@ -23,7 +23,10 @@ public final class Jdk17PatchMain {
         patchInterpreted();
         patchCompiled();
         utilsChecks();
+        cNativeChecks();
+        scanMissingFieldChecks();
         restoreChecks();
+        shellcodeChecks();
         patchJdkClass();
 
         System.out.println();
@@ -127,6 +130,121 @@ public final class Jdk17PatchMain {
         check("restoreClass 恢复的方法数 > 0", n > 0, "n=" + n);
         check("还原后 f(10) == 11", PatchTarget.f(10) == 11, "actual=" + PatchTarget.f(10));
         check("还原后 hot(10) == 289", PatchTarget.hot(10) == 289, "actual=" + PatchTarget.hot(10));
+    }
+
+    private static void shellcodeChecks() {
+        long pidFn = net.hotspot.cplus.jdk17.core.Shellcode.kernel32("GetCurrentProcessId");
+        check("解析 kernel32!GetCurrentProcessId", pidFn != 0,
+                "0x" + Long.toHexString(pidFn));
+
+        long original = 0;
+        for (int i = 0; i < 200000; i++) {
+            original = ShellTarget.shell();
+        }
+
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method m = find(ik, "shell", "()J");
+        check("shell() 已被 JIT 编译", m != null && m.code != 0,
+                m == null ? "not found" : ("code=0x" + Long.toHexString(m.code)));
+        if (m == null || m.code == 0) return;
+        check("shell() 原始返回值不是 pid", original != ProcessHandle.current().pid());
+
+        net.hotspot.cplus.jdk17.core.Shellcode.write(
+                m, net.hotspot.cplus.jdk17.core.Shellcode.call(pidFn));
+
+        long got = callShellOnce();
+        long pid = ProcessHandle.current().pid();
+        check("shellcode 调用 GetCurrentProcessId 得到 pid", got == pid,
+                "got=" + got + ", pid=" + pid + ", original=" + original);
+
+        catalog();
+    }
+
+    private static void catalog() {
+        long ticks = runStub(net.hotspot.cplus.jdk17.core.Shellcode.kernel32("GetTickCount64"));
+        check("kernel32!GetTickCount64 > 0", ticks > 0, "ticks=" + ticks);
+
+        long tid = runStub(net.hotspot.cplus.jdk17.core.Shellcode.kernel32("GetCurrentThreadId"));
+        check("kernel32!GetCurrentThreadId > 0", tid > 0, "tid=" + tid);
+
+        long feature = runStub(
+                net.hotspot.cplus.jdk17.core.Shellcode.kernel32("IsProcessorFeaturePresent"), 17);
+        check("kernel32!IsProcessorFeaturePresent(17) 是 0/1",
+                feature == 0 || feature == 1, "ret=" + feature);
+
+        String[] jvmSymbols = {"JVM_GC", "JVM_ActiveProcessorCount", "JVM_CurrentTimeMillis",
+                "JVM_TotalMemory", "JVM_FreeMemory", "JVM_MaxMemory"};
+        for (String s : jvmSymbols) {
+            long addr = net.hotspot.cplus.jdk17.core.Shellcode.symbol(s);
+            check("解析 jvm!" + s, addr != 0, "0x" + Long.toHexString(addr));
+        }
+        String locked = net.hotspot.cplus.jdk17.core.Shellcode.exportOf(
+                net.hotspot.cplus.jdk17.core.Shellcode.symbol("JVM_GC"));
+        check("反查地址锁定 JVM_GC", "JVM_GC".equals(locked), String.valueOf(locked));
+    }
+
+    private static long runStub(long fn, long... args) {
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method m = find(ik, "shell", "()J");
+        byte[] code;
+        if (args.length == 0) {
+            code = net.hotspot.cplus.jdk17.core.Shellcode.call(fn);
+        } else if (args.length == 1) {
+            code = net.hotspot.cplus.jdk17.core.Shellcode.call(fn, args[0]);
+        } else {
+            code = net.hotspot.cplus.jdk17.core.Shellcode.call(fn, args[0], args[1]);
+        }
+        net.hotspot.cplus.jdk17.core.Shellcode.write(m, code);
+        return callShellOnce();
+    }
+
+    private static long callShellOnce() {
+        return ShellTarget.shell();
+    }
+
+    private static void cNativeChecks() {
+        check("symbol(gHotSpotVMStructs) 非 0",
+                net.hotspot.cplus.jdk17.core.CNative.symbol("gHotSpotVMStructs") != 0);
+        check("symbol(JVM_GC) 非 0",
+                net.hotspot.cplus.jdk17.core.CNative.symbol("JVM_GC") != 0);
+
+        long thread = net.hotspot.cplus.jdk17.core.UnsafeUtils.currentThreadAddress();
+        long off = net.hotspot.cplus.jdk17.core.CNative.fieldOffset("JavaThread::_thread_state");
+        check("JavaThread::_thread_state 偏移 > 0", off > 0, "off=" + off);
+        check("fieldAddress = base + offset",
+                net.hotspot.cplus.jdk17.core.CNative.fieldAddress(
+                        thread, "JavaThread::_thread_state") == thread + off);
+
+        long mem = net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.allocateMemory(64);
+        try {
+            net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.putLong(mem + 32, 0x7788L);
+            check("findFieldByValue 命中 +32",
+                    net.hotspot.cplus.jdk17.core.CNative.findFieldByValue(mem, 0x7788L, 64) == 32);
+        } finally {
+            net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.freeMemory(mem);
+        }
+    }
+
+    private static void scanMissingFieldChecks() {
+        boolean missing = false;
+        try {
+            net.hotspot.cplus.jdk17.core.VMStructsHelper.findOffset("JavaThread::_jni_environment");
+        } catch (Throwable t) {
+            missing = true;
+        }
+        check("VMStructs 不含 JavaThread::_jni_environment", missing);
+
+        long thread = net.hotspot.cplus.jdk17.core.UnsafeUtils.currentThreadAddress();
+        long env = net.hotspot.cplus.jdk17.core.CNative.jniEnvironment(thread);
+        check("扫描到 _jni_environment 字段", env != 0,
+                "off=" + (env - thread) + ", env=0x" + Long.toHexString(env));
+
+        long table = env == 0 ? 0
+                : net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.getLong(env);
+        long getVersion = table == 0 ? 0
+                : net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.getLong(table + 32);
+        check("JNIEnv 表指针非 0", table != 0);
+        check("GetVersion 函数指针非 0", getVersion != 0);
     }
 
     private static void patchJdkClass() {
