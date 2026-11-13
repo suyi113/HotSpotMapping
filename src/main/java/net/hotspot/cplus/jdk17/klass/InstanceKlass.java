@@ -161,6 +161,7 @@ public class InstanceKlass extends Klass {
     private static final ConcurrentHashMap<Long, long[]> EXPANDED = new ConcurrentHashMap<>();
     private static final List<Object> PINNED = new CopyOnWriteArrayList<>();
     private static final ConcurrentHashMap<Long, Integer> CACHE_NEXT = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, Map<Integer, Integer>> CP_TO_CACHE = new ConcurrentHashMap<>();
 
     private static final int HEADER_SIZE   = 72;
     private static final int TAGS_HEADER   = 4;
@@ -465,8 +466,8 @@ public class InstanceKlass extends Klass {
 
         int nameIdx = addUtf8(className, donors);
 
+        ensureResolvedKlassesCapacity(expandedResolvedKlassesLength);
         int rkIndex = expandedResolvedKlassesLength;
-        ensureResolvedKlassesCapacity(rkIndex);
         putResolvedKlass(rkIndex, klassAddr);
 
         int idx = expandedLength;
@@ -550,17 +551,13 @@ public class InstanceKlass extends Klass {
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_FIELDREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
-        System.out.printf("[CP] Field #%d (FORCE-NEW) classIdx=%d natIdx=%d%n",
-                idx, classIdx, natIdx);
         bumpLength();
         readFields();
-        return idx;
+        return cacheEntryFor(idx);
     }
 
     public int addMethodref(String owner, String name, String desc, Class<?>... donors) {
@@ -569,24 +566,17 @@ public class InstanceKlass extends Klass {
         ensureCpCapacity(1);
         int existing = findExistingRef(TAG_METHODREF, classIdx, natIdx);
         if (existing > 0) {
-            System.out.printf("[CP] Method #%d (reuse) classIdx=%d natIdx=%d %s.%s%s%n",
-                    existing, classIdx, natIdx, owner, name, desc);
-            return existing;
+            return cacheEntryFor(existing);
         }
 
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
-
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_METHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
-        System.out.printf("[CP] Method #%d classIdx=%d natIdx=%d %s.%s%s%n",
-                idx, classIdx, natIdx, owner, name, desc);
         bumpLength();
         readFields();
-        return idx;
+        return cacheEntryFor(idx);
     }
 
     public int addInterfaceMethodref(String owner, String name, String desc, Class<?>... donors) {
@@ -595,23 +585,42 @@ public class InstanceKlass extends Klass {
         ensureCpCapacity(1);
         int existing = findExistingRef(TAG_INTERFACEMETHODREF, classIdx, natIdx);
         if (existing > 0) {
-            System.out.printf("[CP] Iface  #%d (reuse) classIdx=%d natIdx=%d %s.%s%s%n",
-                    existing, classIdx, natIdx, owner, name, desc);
-            return existing;
+            return cacheEntryFor(existing);
         }
 
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
-
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_INTERFACEMETHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
-        System.out.printf("[CP] Iface  #%d classIdx=%d natIdx=%d %s.%s%s%n",
-                idx, classIdx, natIdx, owner, name, desc);
         bumpLength();
         readFields();
+        return cacheEntryFor(idx);
+    }
+
+    public int cacheIndexFor(int cpIdx) {
+        return cacheEntryFor(cpIdx);
+    }
+
+    private int cacheEntryFor(int cpIdx) {
+        Map<Integer, Integer> map = CP_TO_CACHE.computeIfAbsent(
+                getAddress(), k -> new ConcurrentHashMap<>());
+        Integer cached = map.get(cpIdx);
+        if (cached != null) return cached;
+
+        ConstantPoolCache cpc = new ConstantPool(currentCpAddress()).getCache();
+        if (cpc == null) {
+            throw new IllegalStateException("CPC is null");
+        }
+        final int initialLen = cpc.length;
+        int idx = CACHE_NEXT.computeIfAbsent(getAddress(), k -> initialLen);
+        if (idx >= cpc.length) {
+            ensureCpCacheCapacity(idx - cpc.length + 32);
+            cpc = new ConstantPool(currentCpAddress()).getCache();
+        }
+        initCacheEntryIndices(idx, cpIdx);
+        CACHE_NEXT.put(getAddress(), idx + 1);
+        map.put(cpIdx, idx);
         return idx;
     }
 
@@ -760,15 +769,6 @@ public class InstanceKlass extends Klass {
         ConstantPool      preCp  = new ConstantPool(expandedCpAddr);
         ConstantPoolCache preCpc = preCp.getCache();
         int oldCpcLen = preCpc == null ? 0 : preCpc.length;
-
-        System.out.printf("[CP] commit: pre-check cpcLen=%d, needLen=%d%n",
-                oldCpcLen, expandedLength);
-
-        if (oldCpcLen < expandedLength) {
-            int grow = expandedLength - oldCpcLen;
-            System.out.printf("[CP] commit: growing CPC by %d%n", grow);
-            ensureCpCacheCapacity(grow);
-        }
 
         ConstantPool      oldCp     = new ConstantPool(constants);
         long              oldCpAddr = oldCp.getAddress();

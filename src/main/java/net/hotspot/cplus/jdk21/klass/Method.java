@@ -187,6 +187,19 @@ public class Method extends Metadata {
     public static long intrinsicIdFieldOffset() { return INTRINSIC_ID_OFFSET; }
     public static long flagsFieldOffset()       { return FLAGS_OFFSET; }
 
+    /**
+     * 清除 setNotCompilable() 设置的「禁止编译/内联」标记，
+     * 让方法重新可以交给 C1/C2 编译（类还原时使用）。
+     */
+    public void clearNotCompilable() {
+        long base = getAddress();
+        int f = UnsafeUtils.unsafe.getInt(base + FLAGS_OFFSET);
+        f &= ~(FLAG_IS_NOT_C2_COMPILABLE | FLAG_IS_NOT_C1_COMPILABLE
+                | FLAG_IS_NOT_C2_OSR_COMPILABLE | FLAG_DONT_INLINE);
+        UnsafeUtils.unsafe.putInt(base + FLAGS_OFFSET, f);
+        readFields();
+    }
+
     @Override
     public String toString() {
         return String.format(

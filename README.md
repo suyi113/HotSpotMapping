@@ -62,7 +62,7 @@ net.hotspot.cplus.jdkXX
 
 ### 自检
 
-`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`），共 **205 项检查**：
+`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`）/ UnsafeUtils 工具方法 / 类还原，共 **232 项检查**：
 
 ```bash
 ./gradlew testClasses
@@ -135,6 +135,56 @@ if (m.code != 0) {
     System.out.println(nm.stateName() + " compLevel=" + nm.compLevel());
 }
 ```
+
+### UnsafeUtils 常用工具
+
+| 方法 | 说明 |
+|---|---|
+| `addressOf(o)` / `klassAddressOf(o)` | 对象 → oop 地址 / Klass 地址 |
+| `instanceKlassOf(o)` / `classNameOf(o)` | 对象 → `InstanceKlass` / 内部类名 |
+| `sizeOf(o)` | 按 `layout_helper` 计算实例或数组大小 |
+| `read(addr, len)` / `write(addr, bytes)` | 任意地址的字节读写 |
+| `findLoadedClass(name)` / `getLoadedClasses(prefix)` | 在已加载类中按全名/前缀查找 |
+| `threadAddress(t)` / `currentThreadAddress()` | `Thread` → `JavaThread` 地址 |
+| `vmOption(name)` | 读取任意 VM 参数 |
+| `heapUsed()` / `heapCommitted()` / `metaspaceUsed()` | 堆与元空间用量 |
+| `patchMethod(ik, m, code)` | 反优化 + 写字节码 + 提交常量池 + 禁止再编译，一步到位 |
+
+### Hook 反射访问检查（jdk17 / jdk21）
+
+```java
+UnsafeUtils.hookCheckAccess();            // AccessibleObject.checkAccess 变成空实现
+UnsafeUtils.hookCheckCanSetAccessible();  // 所有 checkCanSetAccessible 重载直接放行
+```
+
+如果目标方法已经被 JIT 编译、调用点已解析或内联，只改字节码对已编译的调用方无效。
+这两个 hook 会先打补丁并 `setNotCompilable()`，然后调用 `deoptimizeCallers(target)`：
+
+- 扫描所有已加载类的已编译方法字节码，把 invoke 指令解析到 `(name, signature)`；
+- 凡是调用（因而可能内联）了目标方法的 nmethod，一律 `forceInterpreted()` 丢弃，退回解释器；
+- 再对「调用了这些方法的方法」做传递闭包，直到没有新的调用方为止；
+- 最后 `freezeTarget()` 轮询清除「补丁前就已排队、补丁后才安装」的旧 nmethod。
+
+等价于 retransform 触发反优化的效果，但不需要 `-javaagent`，也不重新定义类；
+`deoptimizeCallers` 返回被反优化的方法数，可以作为工具方法单独调用。
+jdk21 的 `checkCanSetAccessible` 有三个重载，hook 会把它们全部补丁化。
+
+### 类还原（restoreClass）
+
+```java
+int n = UnsafeUtils.restoreClass(MyClass.class);
+```
+
+从 class 文件重新解析方法字节码，把运行时被 agent / 本库改过的 `ConstMethod` 覆盖回去：
+
+- 还原 `code`、`max_stack`、`max_locals`；
+- 清除 `not-compilable` / `dont_inline` 标记，让方法重新可以被 JIT 编译；
+- 常量池长度收缩回 class 文件里的条目数，隐藏后来追加的条目；
+- 对所有被还原方法的调用方做传递反优化（等价于 retransform 的反优化效果），
+  下一次调用会重新解析、走还原后的字节码。
+
+限制：按「同名同签名」匹配方法。class 文件里没有的运行时方法不会被删除，
+class 文件里有但运行时没有的方法也不会凭空创建（那需要重建 `InstanceKlass`）。
 
 ### 替换方法字节码
 

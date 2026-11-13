@@ -21,4 +21,8 @@ public class PatchTarget {
         }
         return s + 1;
     }
+
+    public static int spare(int x) {
+        return x + 5;
+    }
 }

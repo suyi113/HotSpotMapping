@@ -22,6 +22,8 @@ public final class Jdk17PatchMain {
 
         patchInterpreted();
         patchCompiled();
+        utilsChecks();
+        restoreChecks();
         patchJdkClass();
 
         System.out.println();
@@ -60,11 +62,12 @@ public final class Jdk17PatchMain {
         m.setNotCompilable();
 
         ConstantPool afterCp = new ConstantPool(ik.constants);
-        int cpIdx = (code[2] & 0xFF) | ((code[3] & 0xFF) << 8);
+        int cacheIdx = (code[2] & 0xFF) | ((code[3] & 0xFF) << 8);
+        int cpIdx = afterCp.getCache().entryConstantPoolIndex(cacheIdx);
         int classIdx = (int) (afterCp.slotAt(cpIdx) & 0xFFFF);
         check("invokestatic 指向 ExternalHelper",
                 "net/hotspot/cplus/jdk17/ExternalHelper".equals(cpClassName(afterCp, classIdx)),
-                cpClassName(afterCp, classIdx));
+                "cacheIdx=" + cacheIdx + ", cpIdx=" + cpIdx + ", " + cpClassName(afterCp, classIdx));
 
         check("替换后 f(10) == 20", PatchTarget.f(10) == 20, "actual=" + PatchTarget.f(10));
     }
@@ -102,6 +105,28 @@ public final class Jdk17PatchMain {
         check("30 万次热调用不崩溃", sum != 0, "sum=" + sum);
         check("热调用后仍执行新字节码", PatchTarget.hot(10) == 20, "actual=" + PatchTarget.hot(10));
         check("方法没有被重新编译", m.code == 0, "code=0x" + Long.toHexString(m.code));
+    }
+
+    private static void utilsChecks() {
+        check("classNameOf(String)", "java/lang/String".equals(UnsafeUtils.classNameOf("abc")),
+                UnsafeUtils.classNameOf("abc"));
+        check("sizeOf(new Object()) == 16", UnsafeUtils.sizeOf(new Object()) == 16,
+                "size=" + UnsafeUtils.sizeOf(new Object()));
+        check("sizeOf(new int[4]) == 32", UnsafeUtils.sizeOf(new int[4]) == 32,
+                "size=" + UnsafeUtils.sizeOf(new int[4]));
+        check("findLoadedClass(java/lang/String)",
+                UnsafeUtils.findLoadedClass("java/lang/String") == String.class);
+        check("currentThreadAddress 非 0", UnsafeUtils.currentThreadAddress() != 0,
+                "0x" + Long.toHexString(UnsafeUtils.currentThreadAddress()));
+        check("heapUsed > 0", UnsafeUtils.heapUsed() > 0, "used=" + UnsafeUtils.heapUsed());
+    }
+
+    private static void restoreChecks() {
+        check("还原前 f(10) == 20", PatchTarget.f(10) == 20, "actual=" + PatchTarget.f(10));
+        int n = UnsafeUtils.restoreClass(PatchTarget.class);
+        check("restoreClass 恢复的方法数 > 0", n > 0, "n=" + n);
+        check("还原后 f(10) == 11", PatchTarget.f(10) == 11, "actual=" + PatchTarget.f(10));
+        check("还原后 hot(10) == 289", PatchTarget.hot(10) == 289, "actual=" + PatchTarget.hot(10));
     }
 
     private static void patchJdkClass() {
@@ -143,6 +168,14 @@ public final class Jdk17PatchMain {
         Object r = sun.misc.Unsafe.getUnsafe();
         check("patch 后 getUnsafe() 返回 null", r == null, String.valueOf(r));
         check("patch 后确实调用了 PatchPrint.print", PatchPrint.printed);
+
+        try {
+            long mem = UnsafeUtils.unsafe.allocateMemory(16);
+            UnsafeUtils.unsafe.freeMemory(mem);
+            check("patch 后 Unsafe 其他方法仍可用", true);
+        } catch (Throwable t) {
+            check("patch 后 Unsafe 其他方法仍可用", false, t.toString());
+        }
         check("Unsafe.getUnsafe 已被标记为不可编译", m.isNotCompilable() && m.isDontInline());
     }
 

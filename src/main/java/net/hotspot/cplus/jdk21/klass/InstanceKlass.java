@@ -469,6 +469,7 @@ public class InstanceKlass extends Klass {
     private static final ConcurrentHashMap<Long, long[]>  EXPANDED   = new ConcurrentHashMap<>();
     private static final List<Object>                     PINNED     = new CopyOnWriteArrayList<>();
     private static final ConcurrentHashMap<Long, Integer> CACHE_NEXT = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, Map<Integer, Integer>> CP_TO_CACHE = new ConcurrentHashMap<>();
 
     private void restoreExpandedState() {
         long[] st = EXPANDED.get(getAddress());
@@ -588,8 +589,8 @@ public class InstanceKlass extends Klass {
 
         int nameIdx = addUtf8(className, donors);
 
+        ensureResolvedKlassesCapacity(expandedResolvedKlassesLength);
         int rkIndex = expandedResolvedKlassesLength;
-        ensureResolvedKlassesCapacity(rkIndex);
         putResolvedKlass(rkIndex, klassAddr);
 
         int idx = expandedLength;
@@ -672,15 +673,13 @@ public class InstanceKlass extends Klass {
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_FIELDREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
         bumpLength();
         readFields();
-        return idx;
+        return cacheEntryFor(idx);
     }
 
     public int addMethodref(String owner, String name, String desc, Class<?>... donors) {
@@ -688,19 +687,16 @@ public class InstanceKlass extends Klass {
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
         int existing = findExistingRef(TAG_METHODREF, classIdx, natIdx);
-        if (existing > 0) return existing;
+        if (existing > 0) return cacheEntryFor(existing);
 
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
-
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_METHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
         bumpLength();
         readFields();
-        return idx;
+        return cacheEntryFor(idx);
     }
 
     public int addInterfaceMethodref(String owner, String name, String desc, Class<?>... donors) {
@@ -708,18 +704,50 @@ public class InstanceKlass extends Klass {
         int natIdx   = addNameAndType(name, desc, donors);
         ensureCpCapacity(1);
         int existing = findExistingRef(TAG_INTERFACEMETHODREF, classIdx, natIdx);
-        if (existing > 0) return existing;
+        if (existing > 0) return cacheEntryFor(existing);
 
         int idx = expandedLength;
-        ensureCpCacheHasIndex(idx);
-        initCacheEntryIndices(idx, idx);
-
         long base = expandedCpAddr + HEADER_SIZE + idx * 8L;
         UnsafeUtils.unsafe.putByte(expandedTagsAddr + TAGS_HEADER + idx, (byte) TAG_INTERFACEMETHODREF);
         UnsafeUtils.unsafe.putShort(base,      (short) classIdx);
         UnsafeUtils.unsafe.putShort(base + 2L, (short) natIdx);
         bumpLength();
         readFields();
+        return cacheEntryFor(idx);
+    }
+
+    /**
+     * 为一个 CP 条目分配 **新的** CP cache entry（追加到末尾），返回 cache index。
+     *
+     * <p>字节码里 invoke/field 类指令的操作数在类链接后被重写成 cache index，
+     * 不是 CP index；之前直接把 CP index 当 cache index 用，会覆盖别的已解析条目
+     * （例如给 Unsafe 加方法时把 freeMemory 的 cache entry 冲掉，调用时报
+     * NoSuchMethodError）。这里改成「CP 条目追加 + cache entry 追加」，
+     * 用 {@code _indices} 记录 CP index。
+     */
+    public int cacheIndexFor(int cpIdx) {
+        return cacheEntryFor(cpIdx);
+    }
+
+    private int cacheEntryFor(int cpIdx) {
+        Map<Integer, Integer> map = CP_TO_CACHE.computeIfAbsent(
+                getAddress(), k -> new ConcurrentHashMap<>());
+        Integer cached = map.get(cpIdx);
+        if (cached != null) return cached;
+
+        ConstantPoolCache cpc = new ConstantPool(currentCpAddress()).getCache();
+        if (cpc == null) {
+            throw new IllegalStateException("CPC is null");
+        }
+        final int initialLen = cpc.length;
+        int idx = CACHE_NEXT.computeIfAbsent(getAddress(), k -> initialLen);
+        if (idx >= cpc.length) {
+            ensureCpCacheCapacity(idx - cpc.length + 32);
+            cpc = new ConstantPool(currentCpAddress()).getCache();
+        }
+        initCacheEntryIndices(idx, cpIdx);
+        CACHE_NEXT.put(getAddress(), idx + 1);
+        map.put(cpIdx, idx);
         return idx;
     }
 
@@ -838,10 +866,6 @@ public class InstanceKlass extends Klass {
         ConstantPool      preCp  = new ConstantPool(expandedCpAddr);
         ConstantPoolCache preCpc = preCp.getCache();
         int oldCpcLen = preCpc == null ? 0 : preCpc.length;
-
-        if (oldCpcLen < expandedLength) {
-            ensureCpCacheCapacity(expandedLength - oldCpcLen);
-        }
 
         ConstantPool      oldCp     = new ConstantPool(constants);
         long              oldCpAddr = oldCp.getAddress();

@@ -96,6 +96,12 @@ public final class Jdk21Main {
         section("反优化（编译后再替换）");
         deoptPatchChecks();
 
+        section("UnsafeUtils 工具方法");
+        utilsChecks();
+
+        section("类还原（restoreClass）");
+        restoreChecks();
+
         section("修改 JDK 内部类（sun.misc.Unsafe）");
         unsafePatchChecks();
 
@@ -718,11 +724,12 @@ public final class Jdk21Main {
                 oldLen + " -> " + ik.getConstantPool().length);
 
         ConstantPool afterCp = new ConstantPool(ik.constants);
-        int cpIdx = (code[2] & 0xFF) | ((code[3] & 0xFF) << 8);
+        int cacheIdx = (code[2] & 0xFF) | ((code[3] & 0xFF) << 8);
+        int cpIdx = afterCp.getCache().entryConstantPoolIndex(cacheIdx);
         int classIdx = (int) (afterCp.slotAt(cpIdx) & 0xFFFF);
         check("invokestatic 指向 ExternalHelper",
                 "net/hotspot/cplus/jdk21/ExternalHelper".equals(cpClassName(afterCp, classIdx)),
-                cpClassName(afterCp, classIdx));
+                "cacheIdx=" + cacheIdx + ", cpIdx=" + cpIdx + ", " + cpClassName(afterCp, classIdx));
 
         int r = PatchTarget.target(10);
         check("修改后 target(10) == 20", r == 20, "actual=" + r);
@@ -874,10 +881,97 @@ public final class Jdk21Main {
         Object r = sun.misc.Unsafe.getUnsafe();
         check("patch 后 getUnsafe() 返回 null", r == null, String.valueOf(r));
         check("patch 后确实调用了 PatchPrint.print", PatchPrint.printed);
+
+        try {
+            long mem2 = UnsafeUtils.unsafe.allocateMemory(16);
+            UnsafeUtils.unsafe.freeMemory(mem2);
+            check("patch 后 Unsafe 其他方法仍可用", true);
+        } catch (Throwable t) {
+            check("patch 后 Unsafe 其他方法仍可用", false, t.toString());
+        }
         check("Unsafe.getUnsafe 已被标记为不可编译", m.isNotCompilable() && m.isDontInline(),
                 "flags=0x" + Integer.toHexString(m.flags));
 
         System.out.println("  " + m);
+    }
+
+    private static void utilsChecks() {
+        String s = "abc";
+        check("addressOf 非 0", UnsafeUtils.addressOf(s) != 0,
+                "0x" + Long.toHexString(UnsafeUtils.addressOf(s)));
+        check("klassAddressOf == Klass(String).address",
+                UnsafeUtils.klassAddressOf(s) == new Klass(String.class).getAddress(),
+                "0x" + Long.toHexString(UnsafeUtils.klassAddressOf(s)));
+        check("instanceKlassOf 名字", "java/lang/String".equals(
+                UnsafeUtils.instanceKlassOf(s).getName()), UnsafeUtils.classNameOf(s));
+        check("classNameOf(int[])", "[I".equals(UnsafeUtils.classNameOf(new int[0])),
+                UnsafeUtils.classNameOf(new int[0]));
+
+        check("sizeOf(new Object()) == 16", UnsafeUtils.sizeOf(new Object()) == 16,
+                "size=" + UnsafeUtils.sizeOf(new Object()));
+        check("sizeOf(\"abc\") == 24", UnsafeUtils.sizeOf("abc") == 24,
+                "size=" + UnsafeUtils.sizeOf("abc"));
+        check("sizeOf(new int[4]) == 32", UnsafeUtils.sizeOf(new int[4]) == 32,
+                "size=" + UnsafeUtils.sizeOf(new int[4]));
+
+        long mem = UnsafeUtils.unsafe.allocateMemory(16);
+        try {
+            UnsafeUtils.write(mem, new byte[]{1, 2, 3, 4});
+            byte[] back = UnsafeUtils.read(mem, 4);
+            check("read/write 往返", back[0] == 1 && back[1] == 2
+                    && back[2] == 3 && back[3] == 4, java.util.Arrays.toString(back));
+        } finally {
+            UnsafeUtils.unsafe.freeMemory(mem);
+        }
+
+        check("findLoadedClass(java/lang/String)", UnsafeUtils.findLoadedClass("java/lang/String") == String.class);
+        check("getLoadedClasses(java/lang/Str) 包含 String",
+                UnsafeUtils.getLoadedClasses("java/lang/Str").contains(String.class));
+
+        check("vmOption(UseCompressedOops) 一致",
+                String.valueOf(OopDesc.USE_COMPRESSED_OOPS).equals(UnsafeUtils.vmOption("UseCompressedOops")),
+                UnsafeUtils.vmOption("UseCompressedOops"));
+        check("heapUsed > 0", UnsafeUtils.heapUsed() > 0, "used=" + UnsafeUtils.heapUsed());
+        check("heapCommitted > heapUsed", UnsafeUtils.heapCommitted() >= UnsafeUtils.heapUsed());
+        check("metaspaceUsed > 0", UnsafeUtils.metaspaceUsed() > 0, "used=" + UnsafeUtils.metaspaceUsed());
+
+        long cur = UnsafeUtils.currentThreadAddress();
+        check("currentThreadAddress 非 0", cur != 0, "0x" + Long.toHexString(cur));
+        check("threadAddress(currentThread) 一致", cur == UnsafeUtils.threadAddress(Thread.currentThread()));
+
+        InstanceKlass ik = new InstanceKlass(PatchTarget.class);
+        Method spare = ik.findMethod("spare", "(I)I");
+        check("找到 spare(I)I", spare != null);
+        if (spare != null) {
+            check("spare 原行为", PatchTarget.spare(0) == 5, "actual=" + PatchTarget.spare(0));
+            CodeBuilder cb = new CodeBuilder();
+            cb.bipush(9);
+            cb.ireturn();
+            UnsafeUtils.patchMethod(ik, spare, cb.build(ik));
+            check("patchMethod 后 spare(0) == 9", PatchTarget.spare(0) == 9,
+                    "actual=" + PatchTarget.spare(0));
+            check("patchMethod 后不可编译", spare.isNotCompilable() && spare.isDontInline());
+        }
+    }
+
+    private static void restoreChecks() {
+        check("还原前 target(10) == 20", PatchTarget.target(10) == 20,
+                "actual=" + PatchTarget.target(10));
+
+        int n = UnsafeUtils.restoreClass(PatchTarget.class);
+        check("restoreClass 恢复的方法数 > 0", n > 0, "n=" + n);
+        check("还原后 target(10) == 11", PatchTarget.target(10) == 11,
+                "actual=" + PatchTarget.target(10));
+        check("还原后 compiled(10) == 289", PatchTarget.compiled(10) == 289,
+                "actual=" + PatchTarget.compiled(10));
+        check("还原后 spare(0) == 5", PatchTarget.spare(0) == 5,
+                "actual=" + PatchTarget.spare(0));
+
+        InstanceKlass ik = new InstanceKlass(PatchTarget.class);
+        check("还原后常量池不含 ExternalHelper",
+                !cpHasClass(ik.getConstantPool(),
+                        "net/hotspot/cplus/jdk21/ExternalHelper"),
+                "cpLen=" + ik.getConstantPool().length);
     }
 
     private static void errorPaths() {        try {
