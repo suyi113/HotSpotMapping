@@ -83,6 +83,21 @@ public final class Shellcode {
         return stub(target, new long[]{a0, a1});
     }
 
+    /**
+     * 作为 native 函数被 JVM 的 native wrapper 调用时的尾跳 stub：
+     * {@code mov rax, target; jmp rax}。不能用 call + 改 rsp，
+     * 否则会破坏 wrapper 预留的影子空间/栈帧。
+     */
+    public static byte[] tailCall(long target) {
+        byte[] b = new byte[12];
+        b[0] = 0x48;
+        b[1] = (byte) 0xB8;
+        putLong(b, 2, target);
+        b[10] = (byte) 0xFF;
+        b[11] = (byte) 0xE0;
+        return b;
+    }
+
     /** 调用 JVM_* 入口：第一个参数是 JNIEnv*（rdi），第二个参数置空（rsi）。 */
     public static byte[] callJni(long target, long env) {
         byte[] b = new byte[37];
@@ -389,7 +404,13 @@ public final class Shellcode {
      */
     public static long hookNativeWrapper(Class<?> holder, String name, String sig, long shellcode) {
         InstanceKlass ik = new InstanceKlass(holder);
-        net.hotspot.cplus.jdk21.klass.Method m = ik.findMethod(name, sig);
+        net.hotspot.cplus.jdk21.klass.Method m = null;
+        for (net.hotspot.cplus.jdk21.klass.Method cand : ik.methodsArray().toMethods()) {
+            if (name.equals(cand.name()) && sig.equals(cand.signature())) {
+                m = cand;
+                break;
+            }
+        }
         if (m == null || m.code == 0) return 0;
         NMethod nm = new NMethod(m.code);
         long base = moduleBase(findNative("gHotSpotVMStructs"));

@@ -62,7 +62,7 @@ net.hotspot.cplus.jdkXX
 
 ### 自检
 
-`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`）/ UnsafeUtils 工具方法 / 类还原 / Shellcode 调用本地函数 / C 层字段寻址（含扫描 VMStructs 缺失字段），共 **260 项检查**：
+`src/test/java/net/hotspot/cplus/jdk21/Jdk21Main.java` 是一个可执行的冒烟测试，覆盖 Klass / InstanceKlass / Method / 字段 / OopDesc / 类加载 / 堆扫描 / nmethod / 线程 / 常量池扩展 / 字节码替换 / 反优化 / 修改 JDK 内部类（`sun.misc.Unsafe`）/ UnsafeUtils 工具方法 / 类还原（含异常表/行号/局部变量/StackMap/注解/访问标志）/ Shellcode 调用本地函数 / C 层字段寻址（含扫描 VMStructs 缺失字段）/ 劫持 native 方法调用 JVM 入口，共 **293 项检查**：
 
 ```bash
 ./gradlew testClasses
@@ -177,30 +177,60 @@ int n = UnsafeUtils.restoreClass(MyClass.class);
 
 从 class 文件重新解析方法字节码，把运行时被 agent / 本库改过的 `ConstMethod` 覆盖回去：
 
-- 还原 `code`、`max_stack`、`max_locals`；
+- 还原 `code`（重新写成 cache index 形式）、`max_stack`、`max_locals`；
+- 还原 **异常表**、**LineNumberTable**（按 HotSpot 的 UNSIGNED5 压缩格式重新编码）、
+  **LocalVariableTable**（含 `LocalVariableTypeTable` 的签名索引）、**StackMapTable**；
+- 还原**方法注解**（`RuntimeVisibleAnnotations`，写入已有的 AnnotationArray）；
+- 还原**方法访问标志**（保留 JVM 内部高位，恢复 class 文件里的 u2）；
 - 清除 `not-compilable` / `dont_inline` 标记，让方法重新可以被 JIT 编译；
 - 常量池长度收缩回 class 文件里的条目数，隐藏后来追加的条目；
-- 对所有被还原方法的调用方做传递反优化（等价于 retransform 的反优化效果），
-  下一次调用会重新解析、走还原后的字节码。
+- 对所有被还原方法的调用方做传递反优化（等价于 retransform 的反优化效果）。
 
-限制：按「同名同签名」匹配方法。class 文件里没有的运行时方法不会被删除，
-class 文件里有但运行时没有的方法也不会凭空创建（那需要重建 `InstanceKlass`）。
+限制：按「同名同签名」匹配方法；`StackMapTable`/注解数组在运行期必须已经存在且容量足够
+（Java 层无法在 metaspace 里新分配数组），否则抛 `IllegalStateException`。
+class 文件里没有的运行时方法不会被删除，文件里有但运行时没有的方法也不会凭空创建。
 
 ### C 层字段寻址（CNative）
 
 ```java
-CNative.symbol("gHotSpotVMStructs");                      // findNative 优先，失败走 PE 导出表
-CNative.fieldOffset("JavaThread::_anchor");               // VMStructs 偏移（实测 920）
-CNative.fieldAddress(thread, "JavaThread::_anchor");      // base + offset
-CNative.fieldInt(thread, "JavaThread::_thread_state");    // 读字段
-CNative.findFieldByValue(base, 0x1122334455667788L, 64);  // 已知值反查字段偏移
-CNative.findPointer(start, end, value);                   // 找指向某值的指针
-CNative.deref(base, 16, 8);                               // 指针链取值
-CNative.addressOf(base, 16, 8);                           // 指针链求地址（最后一段只加偏移）
+CNative.symbol("JvmtiExport::_can_access_local_variables"); // 未导出静态字段 → VMStructs 静态地址
+CNative.symbol("JVM_GC");                                   // 导出符号 → PE 导出表
+CNative.instanceFieldOffset("Klass::_layout_helper");       // 实例字段偏移
+CNative.fieldAddress(thread, "JavaThread::_anchor");        // base + offset
+CNative.fieldInt(thread, "JavaThread::_thread_state");      // 读字段
+CNative.findFieldByValue(base, 0x1122334455667788L, 64);    // 已知值反查字段偏移
+CNative.findPointer(start, end, value);                     // 找指向某值的指针
+CNative.scanValue(value, limit);                            // 特征值扫描 jvm.dll 镜像
+CNative.findRipReferences(target, limit);                   // 反查引用该地址的指令（调用链）
+CNative.deref(base, 16, 8);                                 // 指针链取值
+CNative.addressOf(base, 16, 8);                             // 指针链求地址
+
+// 一步到位：导出符号 → 静态字段 → 实例字段偏移 → 特征值扫描 + 调用链证据
+CNative.Resolution r = CNative.resolve("JvmtiExport::_can_access_local_variables");
+System.out.println(r);      // Resolution[... STATIC_FIELD, address=0x7ffd..., evidence=2]
+long off = CNative.resolve("Klass::_layout_helper").offset; // 8
 ```
 
-四种手段：**VMStructs 偏移**、**符号解析**（findNative / PE 导出表）、**内存扫描**（已知值反查字段）、
-**指针链跟踪**（如 `Klass::_java_mirror` → handle → oop）。
+**没导出、也不在 VMStructs 的字段**：JVM 不会把名字写进内存，所以「只给名字」在信息论上
+无法定位；这时要给它一个**特征判据**（值/结构），`resolveByProbe` 会扫描并反查引用作为证据：
+
+```java
+// JavaThread::_jni_environment 既不在 VMStructs 也不是导出符号，
+// 判据：字段值指向 jvm.dll 里的 JNINativeInterface_ 表
+CNative.Resolution e = CNative.resolveJniEnvironment(thread);
+// PROBE_HIT, address = thread + 952(jdk21) / 688(jdk17)
+
+// 自定义判据
+CNative.resolveByProbe(name, host, range, 8, (addr, value) -> /* 判断 value/addr */);
+```
+
+`symbol(name)` 的解析顺序：**findNative → PE 导出表 → VMStructs 静态字段**，所以
+`JvmtiExport::_can_access_local_variables` 这种**没有导出**的 C++ 静态字段也能拿到真实地址
+（实测与 `VMStructsHelper.findStaticAddress` 完全一致）。
+
+其他手段：**VMStructs 偏移**（实例字段）、**特征值扫描**（`scanValue`/`findFieldByValue`）、
+**反查调用链**（`findRipReferences`：扫描 jvm.dll 代码里的 `mov/movzx ... [rip+disp]`，
+反推出引用目标字段的指令）、**指针链跟踪**（`Klass::_java_mirror` → handle → oop）。
 
 **验证「VMStructs 里没有的字段」也能找到**：`JavaThread::_jni_environment` 不在 VMStructs 里
 （`findOffset` 抛异常），`CNative.jniEnvironment(thread)` 用扫描找它——判据是 JavaThread 里某个
@@ -242,27 +272,30 @@ long pid = ShellTarget.shell();                            // 实际执行 shell
 栈遍历而崩；所以 **catalog 只对 JVM 符号做解析/反查，不把 JVM_* 调用列为稳定用例**，
 Windows API 才是稳定可调用的。
 
-#### 伪造 native 帧的尝试（实验）
+#### 劫持 native 方法：在真正的 native 帧里调 JVM 入口
 
-从 JDK 源码看（[javaFrameAnchor.hpp](https://raw.githubusercontent.com/openjdk/jdk21u/master/src/hotspot/share/runtime/javaFrameAnchor.hpp)、
-[sharedRuntime_x86_64.cpp](https://raw.githubusercontent.com/jatin-bhateja/jdk/f82741e0c47f5e9cd658dbd18ee2e69dd7be8cd6/src/hotspot/cpu/x86/sharedRuntime_x86_64.cpp)）：
+fake anchor 走不通（anchor 指向的是带 oopmap 的 wrapper 代码），改为**复用真正的 native wrapper**：
 
-- `JavaFrameAnchor` 的布局是 `_last_Java_sp`(+0)、`_last_Java_pc`(+8)、CPU 头里的 `_last_Java_fp`(+16)；
-- native wrapper 在调 native 前执行 `set_last_Java_frame(rsp, noreg, the_pc)`，
-  `the_pc` 是 **wrapper 自己的代码地址**，并且之前 `oop_maps->add_gc_map(the_pc - start, map)`
-  登记过 oopmap；随后把 `_thread_state` 设为 `_thread_in_native`，再 `call native_func`。
+1. `Method::native_function` 不在 VMStructs 里，它是内嵌在 `Method` 结构之后的指针
+   （`Method::native_function_addr() = (address*)(this+1)`），偏移 = `align_up(sizeof(Method))`；
+   `Method.nativeFunction()` / `setNativeFunction()` 就是读写这个位置（测试里读到
+   `Runtime.totalMemory` 的 0x7ffb... 指针）。
+2. 把这段指针改成我们 shellcode 的地址（shellcode 放在某个已编译方法的 verified entry）。
+3. shellcode 必须是**尾跳**：`mov rax, target; jmp rax`（`Shellcode.tailCall`），
+   不能 `call` + 改 rsp——那会破坏 wrapper 预留的影子空间，`JVM_*` 会卡死。
+4. 从 Java 调这个 native 方法：wrapper 会自己 `set_last_Java_frame`、把状态切成
+   `_thread_in_native`、把 `JNIEnv*` 放进 rdi，然后跳到我们的 shellcode——
+   这时调 `JVM_*` 就是合法的。
 
-也就是说，anchor 指向的是 **带 oopmap 的 wrapper 代码**，不是调用方 Java 帧。`callJvmAnchored`
-按 `{sp, pc, fp}` 正确布局塞了调用方编译帧（`sp = rbp+8`、`pc = [rbp+8]`、`fp = rbp`），
-但我们的 shellcode 在 Java nmethod 里，没有对应的 oopmap；而且 209 字节的 stub 会越过
-`ShellTarget.shell` nmethod 的代码区、踩到相邻的 nmethod，实测仍在 code cache 里崩。
+实测（jdk21 / jdk17 都通过）：
 
-结论：要真正复刻，必须让 shellcode 跑在**有 oopmap 的 native wrapper** 里。
-`hookNativeWrapper(holder, name, sig, shellcode)` 已写好雏形：定位 native wrapper 里
-`E8 rel32` 的 `call native_func` 并改写到 shellcode；但 JDK 21 里 native 方法的
-`Method::_code` 为 0（wrapper 不在 `_code` 里），需要从 `Method::from_compiled_entry`
-或 `CodeCache` 遍历里找 wrapper，是下一步。
-`callJvmAnchored`、`callJvmEnv`、`hookNativeWrapper` 都保留为实验 API。
+```
+[PASS] 读到 Runtime.totalMemory 的 native function 指针   (0x7ffb...)
+[PASS] 经 native wrapper 调用 JVM_CurrentTimeMillis   (ret=1794591358183, now=1794591358183)
+[PASS] 恢复 native function 后 totalMemory 正常   (ret=536870912)
+```
+
+`callJvmAnchored` / `callJvmEnv` 作为早期实验保留。
 
 #### 能调用哪些函数（测试里的 catalog）
 

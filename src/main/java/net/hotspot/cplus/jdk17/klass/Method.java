@@ -118,6 +118,23 @@ public class Method extends Metadata {
     public static long intrinsicIdFieldOffset()  { return INTRINSIC_ID_OFFSET; }
     public static long flagsFieldOffset()        { return FLAGS_OFFSET; }
 
+    public static long nativeFunctionOffset() {
+        long size = VMStructsHelper.findSize("Method");
+        return (size + 7L) & ~7L;
+    }
+
+    public long nativeFunctionAddress() {
+        return getAddress() + nativeFunctionOffset();
+    }
+
+    public long nativeFunction() {
+        return UnsafeUtils.unsafe.getLong(nativeFunctionAddress());
+    }
+
+    public void setNativeFunction(long fn) {
+        UnsafeUtils.unsafe.putLong(nativeFunctionAddress(), fn);
+    }
+
     private static final int FLAG_DONT_INLINE = 1 << 2;
 
     public void setNotCompilable() {

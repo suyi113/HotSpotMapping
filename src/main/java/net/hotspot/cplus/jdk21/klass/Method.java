@@ -188,6 +188,27 @@ public class Method extends Metadata {
     public static long flagsFieldOffset()       { return FLAGS_OFFSET; }
 
     /**
+     * native 方法的函数指针内嵌在 Method 结构之后（Method::native_function_addr()）。
+     * 偏移 = align_up(sizeof(Method), wordSize)。
+     */
+    public static long nativeFunctionOffset() {
+        long size = VMStructsHelper.findSize("Method");
+        return (size + 7L) & ~7L;
+    }
+
+    public long nativeFunctionAddress() {
+        return getAddress() + nativeFunctionOffset();
+    }
+
+    public long nativeFunction() {
+        return UnsafeUtils.unsafe.getLong(nativeFunctionAddress());
+    }
+
+    public void setNativeFunction(long fn) {
+        UnsafeUtils.unsafe.putLong(nativeFunctionAddress(), fn);
+    }
+
+    /**
      * 清除 setNotCompilable() 设置的「禁止编译/内联」标记，
      * 让方法重新可以交给 C1/C2 编译（类还原时使用）。
      */

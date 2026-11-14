@@ -25,7 +25,9 @@ public final class Jdk17PatchMain {
         utilsChecks();
         cNativeChecks();
         scanMissingFieldChecks();
+        nativeHookChecks();
         restoreChecks();
+        restoreMetadataChecks();
         shellcodeChecks();
         patchJdkClass();
 
@@ -208,6 +210,33 @@ public final class Jdk17PatchMain {
         check("symbol(JVM_GC) 非 0",
                 net.hotspot.cplus.jdk17.core.CNative.symbol("JVM_GC") != 0);
 
+        long jvmti = net.hotspot.cplus.jdk17.core.CNative.symbol(
+                "JvmtiExport::_can_access_local_variables");
+        check("symbol(未导出静态字段) 回退到 VMStructs", jvmti != 0,
+                "0x" + Long.toHexString(jvmti));
+        check("反查到引用该静态字段的指令",
+                net.hotspot.cplus.jdk17.core.CNative.findRipReferences(jvmti, 8).length > 0);
+
+        net.hotspot.cplus.jdk17.core.CNative.Resolution r1 =
+                net.hotspot.cplus.jdk17.core.CNative.resolve(
+                        "JvmtiExport::_can_access_local_variables");
+        check("resolve(静态字段) 命中",
+                r1.kind == net.hotspot.cplus.jdk17.core.CNative.Kind.STATIC_FIELD
+                        && r1.address != 0, r1.toString());
+        check("resolve 附带调用链证据", r1.evidence.length > 0);
+
+        net.hotspot.cplus.jdk17.core.CNative.Resolution r2 =
+                net.hotspot.cplus.jdk17.core.CNative.resolve("JVM_GC");
+        check("resolve(导出符号) 命中",
+                r2.kind == net.hotspot.cplus.jdk17.core.CNative.Kind.EXPORT
+                        && r2.address != 0, r2.toString());
+
+        net.hotspot.cplus.jdk17.core.CNative.Resolution r3 =
+                net.hotspot.cplus.jdk17.core.CNative.resolve("Klass::_layout_helper");
+        check("resolve(实例字段) 命中",
+                r3.kind == net.hotspot.cplus.jdk17.core.CNative.Kind.INSTANCE_FIELD
+                        && r3.offset == 8, r3.toString());
+
         long thread = net.hotspot.cplus.jdk17.core.UnsafeUtils.currentThreadAddress();
         long off = net.hotspot.cplus.jdk17.core.CNative.fieldOffset("JavaThread::_thread_state");
         check("JavaThread::_thread_state 偏移 > 0", off > 0, "off=" + off);
@@ -239,12 +268,105 @@ public final class Jdk17PatchMain {
         check("扫描到 _jni_environment 字段", env != 0,
                 "off=" + (env - thread) + ", env=0x" + Long.toHexString(env));
 
+        net.hotspot.cplus.jdk17.core.CNative.Resolution probe =
+                net.hotspot.cplus.jdk17.core.CNative.resolveJniEnvironment(thread);
+        check("带特征判据的 resolve 定位 _jni_environment",
+                probe.kind == net.hotspot.cplus.jdk17.core.CNative.Kind.PROBE_HIT
+                        && probe.address == env, probe.toString());
+        check("仅靠名字找不到（必须给判据/线索）",
+                net.hotspot.cplus.jdk17.core.CNative.resolve(
+                        "JavaThread::_jni_environment").kind
+                        == net.hotspot.cplus.jdk17.core.CNative.Kind.NOT_FOUND);
+
         long table = env == 0 ? 0
                 : net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.getLong(env);
         long getVersion = table == 0 ? 0
                 : net.hotspot.cplus.jdk17.core.UnsafeUtils.unsafe.getLong(table + 32);
         check("JNIEnv 表指针非 0", table != 0);
         check("GetVersion 函数指针非 0", getVersion != 0);
+    }
+
+    private static void nativeHookChecks() {
+        for (int i = 0; i < 200000; i++) {
+            ShellTarget.shell();
+        }
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method sm = find(ik, "shell", "()J");
+        check("ShellTarget.shell 已编译", sm != null && sm.code != 0);
+        if (sm == null || sm.code == 0) return;
+
+        InstanceKlass rk = new InstanceKlass(Runtime.class);
+        Method tm = find(rk, "totalMemory", "()J");
+        long saved = tm.nativeFunction();
+        check("读到 Runtime.totalMemory 的 native function 指针", saved != 0,
+                "0x" + Long.toHexString(saved));
+
+        long target = net.hotspot.cplus.jdk17.core.Shellcode.symbol("JVM_CurrentTimeMillis");
+        check("解析 JVM_CurrentTimeMillis", target != 0);
+        long shellcode = new net.hotspot.cplus.jdk17.codecache.NMethod(sm.code).verifiedEntryPoint;
+        net.hotspot.cplus.jdk17.core.Shellcode.write(
+                sm, net.hotspot.cplus.jdk17.core.Shellcode.tailCall(target));
+        tm.setNativeFunction(shellcode);
+
+        long v = callTotalMemoryOnce();
+        long now = System.currentTimeMillis();
+        check("经 native wrapper 调用 JVM_CurrentTimeMillis",
+                Math.abs(v - now) < 10000, "ret=" + v + ", now=" + now);
+
+        tm.setNativeFunction(saved);
+        check("恢复 native function 后 totalMemory 正常",
+                callTotalMemoryOnce() > 0, "ret=" + callTotalMemoryOnce());
+    }
+
+    private static long callTotalMemoryOnce() {
+        return Runtime.getRuntime().totalMemory();
+    }
+
+    private static void restoreMetadataChecks() {
+        net.hotspot.cplus.jdk17.klass.ClassFile cf;
+        try {
+            cf = net.hotspot.cplus.jdk17.klass.ClassFile.parse(readBytes(RestoreTarget.class));
+        } catch (Throwable t) {
+            check("解析 RestoreTarget.class", false, t.toString());
+            return;
+        }
+        net.hotspot.cplus.jdk17.klass.ClassFile.MethodInfo mi = cf.find("compute", "(I)I");
+        check("找到 compute 的 class 文件信息", mi != null);
+        if (mi == null) return;
+        check("class 文件有异常表", mi.exceptionTable.length > 0);
+        check("class 文件有 LineNumberTable", mi.lineNumbers != null && mi.lineNumbers.length > 0);
+        check("class 文件有 LocalVariableTable", !mi.localVars.isEmpty());
+        check("class 文件有 StackMapTable", mi.stackMap != null && mi.stackMap.length > 0);
+        check("class 文件有注解", mi.annotations != null && mi.annotations.length > 0);
+        check("compute(10) 正常", RestoreTarget.compute(10) == 33);
+
+        int n = UnsafeUtils.restoreClass(RestoreTarget.class);
+        check("restoreClass 恢复 RestoreTarget", n > 0, "n=" + n);
+
+        InstanceKlass ik = new InstanceKlass(RestoreTarget.class);
+        Method m = find(ik, "compute", "(I)I");
+        ConstMethod cm = new ConstMethod(m.constMethod);
+        check("异常表长度还原", cm.exceptionTableLength() == mi.exceptionTable.length / 4,
+                "runtime=" + cm.exceptionTableLength() + ", file=" + mi.exceptionTable.length / 4);
+        check("局部变量表长度还原", cm.localvariableTableLength() == mi.localVars.size(),
+                "runtime=" + cm.localvariableTableLength() + ", file=" + mi.localVars.size());
+        check("行号表存在", cm.hasLinenumberTable());
+        check("StackMapTable 长度还原", cm.stackMapLength() == mi.stackMap.length,
+                "runtime=" + cm.stackMapLength() + ", file=" + mi.stackMap.length);
+        check("注解长度还原", cm.methodAnnotationsLength() == mi.annotations.length,
+                "runtime=" + cm.methodAnnotationsLength() + ", file=" + mi.annotations.length);
+        check("方法访问标志还原", (m.accessFlags & 0xFFFF) == mi.accessFlags,
+                "runtime=0x" + Integer.toHexString(m.accessFlags));
+        check("还原后 compute(10) 仍为 33", RestoreTarget.compute(10) == 33);
+    }
+
+    private static byte[] readBytes(Class<?> c) {
+        String path = "/" + c.getName().replace('.', '/') + ".class";
+        try (java.io.InputStream in = c.getResourceAsStream(path)) {
+            return in == null ? new byte[0] : in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static void patchJdkClass() {

@@ -552,9 +552,10 @@ public class UnsafeUtils {
             if (mi == null || mi.code == null) continue;
             byte[] code = rewriteForRuntime(ik, mi.code);
             ConstMethod cm = new ConstMethod(m.constMethod);
-            cm.putCodeAndResize(code);
+            cm.setCodeAndSize(code);
             cm.setMaxStack(mi.maxStack);
             cm.setMaxLocals(mi.maxLocals);
+            ClassRestorer.restoreMethod(ik, m, mi);
             m.clearNotCompilable();
             m.forceInterpreted();
             restored.add(m);

@@ -83,6 +83,21 @@ public final class Shellcode {
         return stub(target, new long[]{a0, a1});
     }
 
+    /**
+     * 作为 native 函数被 JVM 的 native wrapper 调用时的尾跳 stub：
+     * {@code mov rax, target; jmp rax}。不能用 call + 改 rsp，
+     * 否则会破坏 wrapper 预留的影子空间/栈帧。
+     */
+    public static byte[] tailCall(long target) {
+        byte[] b = new byte[12];
+        b[0] = 0x48;
+        b[1] = (byte) 0xB8;
+        putLong(b, 2, target);
+        b[10] = (byte) 0xFF;
+        b[11] = (byte) 0xE0;
+        return b;
+    }
+
     /** 调用 JVM_* 入口：第一个参数是 JNIEnv*（rdi），第二个参数置空（rsi）。 */
     public static byte[] callJni(long target, long env) {
         byte[] b = new byte[37];
@@ -219,12 +234,12 @@ public final class Shellcode {
         // save state
         b.b(0x8B); b.b(0x83); b.i(stateOffset);                      // mov eax,[rbx+off]
         b.b(0x41); b.b(0x89); b.b(0x84); b.b(0x24); b.i(24);         // mov [r12+24],eax
-        // new anchor: sp = rbp+8, fp = rbp, pc = [rbp+8]
+        // new anchor: JavaFrameAnchor = { _last_Java_sp, _last_Java_pc, _last_Java_fp }
         b.b(0x48); b.b(0x8D); b.b(0x45); b.b(0x08);                  // lea rax,[rbp+8]
-        b.b(0x48); b.b(0x89); b.b(0x83); b.i(anchorOffset);          // mov [rbx+off],rax
-        b.b(0x48); b.b(0x89); b.b(0xAB); b.i(anchorOffset + 8);      // mov [rbx+off+8],rbp
+        b.b(0x48); b.b(0x89); b.b(0x83); b.i(anchorOffset);          // mov [rbx+off],rax  (sp)
         b.b(0x48); b.b(0x8B); b.b(0x45); b.b(0x08);                  // mov rax,[rbp+8]
-        b.b(0x48); b.b(0x89); b.b(0x83); b.i(anchorOffset + 16);
+        b.b(0x48); b.b(0x89); b.b(0x83); b.i(anchorOffset + 8);      // mov [rbx+off+8],rax (pc)
+        b.b(0x48); b.b(0x89); b.b(0xAB); b.i(anchorOffset + 16);     // mov [rbx+off+16],rbp (fp)
         // state = 3
         b.b(0xC7); b.b(0x83); b.i(stateOffset); b.i(3);
         // call target

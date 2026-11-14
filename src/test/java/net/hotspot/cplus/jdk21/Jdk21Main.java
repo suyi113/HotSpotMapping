@@ -12,6 +12,7 @@ import net.hotspot.cplus.jdk21.gc.G1CollectedHeap;
 import net.hotspot.cplus.jdk21.gc.HeapRegion;
 import net.hotspot.cplus.jdk21.gc.HeapRegionType;
 import net.hotspot.cplus.jdk21.gc.HeapScanner;
+import net.hotspot.cplus.jdk21.klass.ClassFile;
 import net.hotspot.cplus.jdk21.klass.ConstMethod;
 import net.hotspot.cplus.jdk21.klass.ConstantPool;
 import net.hotspot.cplus.jdk21.klass.FieldInfo;
@@ -103,6 +104,7 @@ public final class Jdk21Main {
 
         section("类还原（restoreClass）");
         restoreChecks();
+        restoreMetadataChecks();
 
         section("Shellcode 调用本地函数");
         shellcodeChecks();
@@ -112,6 +114,9 @@ public final class Jdk21Main {
 
         section("扫描 VMStructs 缺失字段");
         scanMissingFieldChecks();
+
+        section("劫持 native 方法调用 JVM 入口");
+        nativeHookChecks();
 
         section("修改 JDK 内部类（sun.misc.Unsafe）");
         unsafePatchChecks();
@@ -1055,6 +1060,34 @@ public final class Jdk21Main {
                 CNative.symbol("gHotSpotVMStructs") != 0);
         check("symbol(JVM_GC) 非 0", CNative.symbol("JVM_GC") != 0);
 
+        long jvmti = CNative.symbol("JvmtiExport::_can_access_local_variables");
+        long jvmtiExpected = 0;
+        try {
+            jvmtiExpected = VMStructsHelper.findStaticAddress(
+                    "JvmtiExport::_can_access_local_variables");
+        } catch (Throwable ignored) {
+        }
+        check("symbol(未导出静态字段) 回退到 VMStructs 静态地址", jvmti != 0,
+                "0x" + Long.toHexString(jvmti));
+        check("与 findStaticAddress 一致", jvmti == jvmtiExpected,
+                "0x" + Long.toHexString(jvmti) + " vs 0x" + Long.toHexString(jvmtiExpected));
+        check("instanceFieldOffset(Klass::_layout_helper) > 0",
+                CNative.instanceFieldOffset("Klass::_layout_helper") > 0,
+                "off=" + CNative.instanceFieldOffset("Klass::_layout_helper"));
+
+        long[] refs = CNative.findRipReferences(jvmti, 16);
+        check("反查到引用该静态字段的指令", refs.length > 0, "refs=" + refs.length);
+
+        long mem2 = UnsafeUtils.unsafe.allocateMemory(64);
+        try {
+            UnsafeUtils.unsafe.putLong(mem2 + 40, 0x1234ABCD56L);
+            long[] hits = CNative.scanValueIn(mem2, mem2 + 64, 0x1234ABCD56L, 4);
+            check("scanValueIn 命中 +40", hits.length == 1 && hits[0] == mem2 + 40,
+                    "hits=" + hits.length);
+        } finally {
+            UnsafeUtils.unsafe.freeMemory(mem2);
+        }
+
         long thread = UnsafeUtils.currentThreadAddress();
         long anchorOff = CNative.fieldOffset("JavaThread::_anchor");
         check("JavaThread::_anchor 偏移 > 0", anchorOff > 0, "off=" + anchorOff);
@@ -1086,6 +1119,35 @@ public final class Jdk21Main {
         } finally {
             UnsafeUtils.unsafe.freeMemory(mem);
         }
+
+        CNative.Resolution r1 = CNative.resolve("JvmtiExport::_can_access_local_variables");
+        check("resolve(静态字段) 命中",
+                r1.kind == CNative.Kind.STATIC_FIELD && r1.address != 0, r1.toString());
+        check("resolve 附带调用链证据", r1.evidence.length > 0,
+                "evidence=" + r1.evidence.length);
+
+        CNative.Resolution r2 = CNative.resolve("JVM_GC");
+        check("resolve(导出符号) 命中",
+                r2.kind == CNative.Kind.EXPORT && r2.address != 0, r2.toString());
+
+        CNative.Resolution r3 = CNative.resolve("Klass::_layout_helper");
+        check("resolve(实例字段) 命中",
+                r3.kind == CNative.Kind.INSTANCE_FIELD && r3.offset == 8, r3.toString());
+
+        long mem3 = UnsafeUtils.unsafe.allocateMemory(64);
+        try {
+            UnsafeUtils.unsafe.putLong(mem3 + 40, 0x7E57L);
+            CNative.Resolution r4 = CNative.resolve("magic", 0x7E57L, mem3, 64);
+            check("resolve(特征值扫描) 命中",
+                    r4.kind == CNative.Kind.SCAN_HIT && r4.address == mem3 + 40,
+                    r4.toString());
+        } finally {
+            UnsafeUtils.unsafe.freeMemory(mem3);
+        }
+
+        CNative.Resolution r5 = CNative.resolve("no::such_field");
+        check("resolve(不存在) 返回 NOT_FOUND",
+                r5.kind == CNative.Kind.NOT_FOUND, r5.toString());
     }
 
     private static void scanMissingFieldChecks() {
@@ -1101,6 +1163,14 @@ public final class Jdk21Main {
         long env = CNative.jniEnvironment(thread);
         check("扫描到 _jni_environment 字段", env != 0,
                 "off=" + (env - thread) + ", env=0x" + Long.toHexString(env));
+
+        CNative.Resolution probe = CNative.resolveJniEnvironment(thread);
+        check("带特征判据的 resolve 定位 _jni_environment",
+                probe.kind == CNative.Kind.PROBE_HIT && probe.address == env,
+                probe.toString());
+        check("仅靠名字找不到（必须给判据/线索）",
+                CNative.resolve("JavaThread::_jni_environment").kind == CNative.Kind.NOT_FOUND,
+                CNative.resolve("JavaThread::_jni_environment").toString());
 
         long table = env == 0 ? 0 : UnsafeUtils.unsafe.getLong(env);
         long getVersion = table == 0 ? 0 : UnsafeUtils.unsafe.getLong(table + 32);
@@ -1132,6 +1202,91 @@ public final class Jdk21Main {
                     "off=" + (otherEnv - otherAddr) + " vs " + (env - thread));
         } finally {
             other.interrupt();
+        }
+    }
+
+    private static void nativeHookChecks() {
+        for (int i = 0; i < 200000; i++) {
+            ShellTarget.shell();
+        }
+        InstanceKlass ik = new InstanceKlass(ShellTarget.class);
+        Method sm = ik.findMethod("shell", "()J");
+        check("ShellTarget.shell 已编译", sm != null && sm.code != 0);
+        if (sm == null || sm.code == 0) return;
+
+        InstanceKlass rk = new InstanceKlass(Runtime.class);
+        Method tm = rk.findMethod("totalMemory", "()J");
+        long saved = tm.nativeFunction();
+        check("读到 Runtime.totalMemory 的 native function 指针", saved != 0,
+                "0x" + Long.toHexString(saved));
+
+        long target = Shellcode.symbol("JVM_CurrentTimeMillis");
+        check("解析 JVM_CurrentTimeMillis", target != 0);
+        long shellcode = new NMethod(sm.code).verifiedEntryPoint;
+        Shellcode.write(sm, Shellcode.tailCall(target));
+        tm.setNativeFunction(shellcode);
+
+        long v = callTotalMemoryOnce();
+        long now = System.currentTimeMillis();
+        check("经 native wrapper 调用 JVM_CurrentTimeMillis",
+                Math.abs(v - now) < 10000, "ret=" + v + ", now=" + now);
+
+        tm.setNativeFunction(saved);
+        check("恢复 native function 后 totalMemory 正常",
+                callTotalMemoryOnce() > 0, "ret=" + callTotalMemoryOnce());
+    }
+
+    private static long callTotalMemoryOnce() {
+        return Runtime.getRuntime().totalMemory();
+    }
+
+    private static void restoreMetadataChecks() {
+        ClassFile cf;
+        try {
+            cf = ClassFile.parse(readBytes(RestoreTarget.class));
+        } catch (Throwable t) {
+            check("解析 RestoreTarget.class", false, t.toString());
+            return;
+        }
+        ClassFile.MethodInfo mi = cf.find("compute", "(I)I");
+        check("找到 compute 的 class 文件信息", mi != null);
+        if (mi == null) return;
+        check("class 文件有异常表", mi.exceptionTable.length > 0);
+        check("class 文件有 LineNumberTable", mi.lineNumbers != null && mi.lineNumbers.length > 0);
+        check("class 文件有 LocalVariableTable", !mi.localVars.isEmpty());
+        check("class 文件有 StackMapTable", mi.stackMap != null && mi.stackMap.length > 0);
+        check("class 文件有注解", mi.annotations != null && mi.annotations.length > 0);
+        check("compute(10) 正常", RestoreTarget.compute(10) == 33,
+                "actual=" + RestoreTarget.compute(10));
+
+        int n = UnsafeUtils.restoreClass(RestoreTarget.class);
+        check("restoreClass 恢复 RestoreTarget", n > 0, "n=" + n);
+
+        InstanceKlass ik = new InstanceKlass(RestoreTarget.class);
+        Method m = ik.findMethod("compute", "(I)I");
+        ConstMethod cm = new ConstMethod(m.constMethod);
+        check("异常表长度还原", cm.exceptionTableLength() == mi.exceptionTable.length / 4,
+                "runtime=" + cm.exceptionTableLength() + ", file=" + mi.exceptionTable.length / 4);
+        check("局部变量表长度还原", cm.localvariableTableLength() == mi.localVars.size(),
+                "runtime=" + cm.localvariableTableLength() + ", file=" + mi.localVars.size());
+        check("行号表存在", cm.hasLinenumberTable());
+        check("StackMapTable 长度还原", cm.stackMapLength() == mi.stackMap.length,
+                "runtime=" + cm.stackMapLength() + ", file=" + mi.stackMap.length);
+        check("注解长度还原", cm.methodAnnotationsLength() == mi.annotations.length,
+                "runtime=" + cm.methodAnnotationsLength() + ", file=" + mi.annotations.length);
+        check("方法访问标志还原", (m.accessFlags & 0xFFFF) == mi.accessFlags,
+                "runtime=0x" + Integer.toHexString(m.accessFlags) + ", file=0x"
+                        + Integer.toHexString(mi.accessFlags));
+        check("还原后 compute(10) 仍为 33", RestoreTarget.compute(10) == 33,
+                "actual=" + RestoreTarget.compute(10));
+    }
+
+    private static byte[] readBytes(Class<?> c) {
+        String path = "/" + c.getName().replace('.', '/') + ".class";
+        try (java.io.InputStream in = c.getResourceAsStream(path)) {
+            return in == null ? new byte[0] : in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
         }
     }
 

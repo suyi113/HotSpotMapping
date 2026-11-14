@@ -24,7 +24,7 @@ public class ConstMethod extends MetaspaceObj {
     private static final long SIZE_OF_PARAMETERS_OFFSET    = findOffsetOrDefault("ConstMethod::_size_of_parameters",   44L);
     private static final long ORIG_METHOD_IDNUM_OFFSET     = findOffsetOrDefault("ConstMethod::_orig_method_idnum",    46L);
 
-    private static final long CONST_METHOD_HEADER_SIZE     = 48L;
+    public  static final long CONST_METHOD_HEADER_SIZE     = 48L;
 
     public static final int HAS_LINENUMBER_TABLE      = 0x0001;
     public static final int HAS_CHECKED_EXCEPTIONS    = 0x0002;
@@ -95,6 +95,75 @@ public class ConstMethod extends MetaspaceObj {
     public boolean hasParameterAnnotations(){ return (flags & HAS_PARAMETER_ANNOTATIONS) != 0; }
     public boolean hasTypeAnnotations()     { return (flags & HAS_TYPE_ANNOTATIONS) != 0; }
     public boolean hasDefaultAnnotations()  { return (flags & HAS_DEFAULT_ANNOTATIONS) != 0; }
+
+    public int constMethodSizeInBytes() {
+        return constMethodSize * 8;
+    }
+
+    private long endAddr() {
+        return getAddress() + constMethodSizeInBytes();
+    }
+
+    private int annotationCount() {
+        int c = 0;
+        if (hasMethodAnnotations()) c++;
+        if (hasParameterAnnotations()) c++;
+        if (hasTypeAnnotations()) c++;
+        if (hasDefaultAnnotations()) c++;
+        return c;
+    }
+
+    private long sectionPtr() {
+        return endAddr() - 8L * annotationCount();
+    }
+
+    private int u2(long addr) {
+        return UnsafeUtils.unsafe.getShort(addr) & 0xFFFF;
+    }
+
+    public int exceptionTableLength() {
+        if (!hasExceptionHandler()) return 0;
+        long p = sectionPtr();
+        if (hasGenericSignature()) p -= 2;
+        if (hasMethodParameters()) p -= 2 + 4L * u2(p - 2);
+        if (hasCheckedExceptions()) p -= 2 + 2L * u2(p - 2);
+        return u2(p - 2);
+    }
+
+    public int localvariableTableLength() {
+        if (!hasLocalvariableTable()) return 0;
+        long p = sectionPtr();
+        if (hasGenericSignature()) p -= 2;
+        if (hasMethodParameters()) p -= 2 + 4L * u2(p - 2);
+        if (hasCheckedExceptions()) p -= 2 + 2L * u2(p - 2);
+        if (hasExceptionHandler()) p -= 2 + 8L * u2(p - 2);
+        return u2(p - 2);
+    }
+
+    public int stackMapLength() {
+        return stackmapData == 0 ? 0 : UnsafeUtils.unsafe.getInt(stackmapData);
+    }
+
+    public int methodAnnotationsLength() {
+        if (!hasMethodAnnotations()) return 0;
+        long arr = UnsafeUtils.unsafe.getLong(endAddr() - 8);
+        return arr == 0 ? 0 : UnsafeUtils.unsafe.getInt(arr);
+    }
+
+    public void setCodeAndSize(byte[] newCode) {
+        if (newCode == null) return;
+        int capacity = constMethodSizeInBytes() - (int) CONST_METHOD_HEADER_SIZE;
+        if (newCode.length > capacity) {
+            throw new IllegalArgumentException(
+                    "new code length " + newCode.length + " exceeds ConstMethod capacity " + capacity);
+        }
+        long base = codeBase();
+        for (int i = 0; i < newCode.length; i++) {
+            UnsafeUtils.unsafe.putByte(base + i, newCode[i]);
+        }
+        UnsafeUtils.unsafe.putShort(getAddress() + CODE_SIZE_OFFSET, (short) newCode.length);
+        this.codeSize = (short) newCode.length;
+    }
 
     public long codeBase() {
         return getAddress() + CONST_METHOD_HEADER_SIZE;

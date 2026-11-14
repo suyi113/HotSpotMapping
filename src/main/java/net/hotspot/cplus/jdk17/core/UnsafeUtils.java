@@ -109,9 +109,10 @@ public class UnsafeUtils {
             if (mi == null || mi.code == null) continue;
             byte[] code = rewriteForRuntime(ik, mi.code);
             ConstMethod cm = new ConstMethod(m.constMethod);
-            cm.putCodeAndResize(code);
+            cm.setCodeAndSize(code);
             cm.setMaxStack(mi.maxStack);
             cm.setMaxLocals(mi.maxLocals);
+            ClassRestorer.restoreMethod(ik, m, mi);
             m.clearNotCompilable();
             m.forceInterpreted();
             restored.add(m);
@@ -603,6 +604,10 @@ public class UnsafeUtils {
         int lenOffset = OopDesc.USE_COMPRESSED_CLASS_POINTERS ? 12 : 16;
         int length = unsafe.getInt(OopDesc.addressOf(o) + lenOffset);
         return header + ((long) length << log2);
+    }
+
+    public static void main(String[] args){
+       System.out.println( CNative.resolve("JvmtiExport::_should_post_class_file_load_hook"));
     }
 
     public static byte[] read(long address, int length) {
